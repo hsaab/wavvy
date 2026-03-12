@@ -143,7 +143,7 @@ async def credentials_status():
         "supabase_anon_key": bool(sb["anon_key"]),
         "spotify_client_id": bool(sp["client_id"]),
         "spotify_client_secret": bool(sp["client_secret"]),
-        "spotify_redirect_uri": sp["redirect_uri"],
+        "spotify_redirect_uri": bool(sp["redirect_uri"]),
     }
 
 
