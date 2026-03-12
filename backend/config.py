@@ -1,0 +1,67 @@
+"""Configuration loading and saving from config.json."""
+
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+CONFIG_PATH = Path(__file__).parent.parent / "config.json"
+
+_DEFAULT_CONFIG: dict[str, Any] = {
+    "spotify": {
+        "client_id": "",
+        "client_secret": "",
+        "redirect_uri": "http://127.0.0.1:8888/callback",
+    },
+    "supabase": {
+        "url": "",
+        "anon_key": "",
+    },
+    "monitored_playlists": [],
+    "downloads_folder": "~/Downloads",
+    "external_drive_path": "/Volumes/My Passport/Music/iTunes/iTunes Media/Music/Unknown Artist/Unknown Album",
+    "playlist_mapping": {
+        "Disco+Melodic": "Disco & Melodic",
+        "House": "House - Hot Since 82",
+        "Worldtech": "Worldtech Latin Afro",
+        "Tech House": "Tech House",
+    },
+    "poll_interval_minutes": 30,
+    "file_watch_enabled": True,
+}
+
+_config: dict[str, Any] = {}
+
+
+def load_config() -> dict[str, Any]:
+    """Load config from disk, creating default if missing."""
+    global _config
+    if CONFIG_PATH.exists():
+        with open(CONFIG_PATH, "r") as f:
+            _config = json.load(f)
+        logger.info("Config loaded from %s", CONFIG_PATH)
+    else:
+        _config = _DEFAULT_CONFIG.copy()
+        save_config(_config)
+        logger.info("Created default config at %s", CONFIG_PATH)
+    return _config
+
+
+def save_config(data: dict[str, Any]) -> None:
+    """Persist config to disk."""
+    global _config
+    _config = data
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(data, f, indent=2)
+    logger.info("Config saved to %s", CONFIG_PATH)
+
+
+def get_config() -> dict[str, Any]:
+    """Return the current in-memory config (call load_config first)."""
+    if not _config:
+        return load_config()
+    return _config

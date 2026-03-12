@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply antialiased bg-base-900 text-gray-100;
+  }
+
+  /* Scrollbar styling for the rekordbox aesthetic */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-base-900;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-base-600 rounded;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-accent-dim;
+  }
+
+  /* Checkbox accent colour override */
+  input[type="checkbox"] {
+    @apply w-3.5 h-3.5 rounded cursor-pointer;
+  }
+
+  /* Select dropdown dark theme */
+  select option {
+    background-color: #1a1a2e;
+    color: #e5e7eb;
+  }
+}

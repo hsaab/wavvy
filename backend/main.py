@@ -1,0 +1,510 @@
+"""FastAPI application entry point for the DJ Track Pipeline."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+
+from config import load_config, get_config, save_config
+from database import init_supabase, validate_connection
+from file_pipeline import pipeline
+from itunes_bridge import is_music_app_running
+from itunes_scanner import library_cache
+from ws_manager import manager
+
+load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup and shutdown lifecycle."""
+    logger.info("Starting DJ Track Pipeline backend")
+    load_config()
+
+    # Attempt Supabase connection (non-fatal if creds not yet configured)
+    try:
+        init_supabase()
+        if validate_connection():
+            logger.info("Supabase connection verified")
+        else:
+            logger.warning("Supabase reachable but query failed — check schema")
+    except RuntimeError as exc:
+        logger.warning("Supabase not configured yet: %s", exc)
+
+    # Scan iTunes library in background thread (non-blocking)
+    await asyncio.to_thread(library_cache.scan)
+
+    # Start file pipeline (watchdog on ~/Downloads)
+    pipeline.start()
+
+    yield
+
+    pipeline.stop()
+    logger.info("Shutting down DJ Track Pipeline backend")
+
+
+app = FastAPI(title="DJ Track Pipeline", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket
+# ---------------------------------------------------------------------------
+
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    await manager.connect(ws)
+    try:
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(ws)
+
+
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
+
+@app.get("/api/health")
+async def health_check():
+    """Return system health: Supabase, drive mount, Music app, iTunes cache."""
+    drive_path = get_config().get("external_drive_path", "/Volumes/My Passport/Music/iTunes/iTunes Media/Music/Unknown Artist/Unknown Album")
+    drive_mounted = Path(drive_path).exists()
+
+    supabase_ok = False
+    try:
+        supabase_ok = await asyncio.to_thread(validate_connection)
+    except Exception:
+        pass
+
+    music_app_running = await asyncio.to_thread(is_music_app_running)
+
+    return {
+        "supabase": supabase_ok,
+        "drive_mounted": drive_mounted,
+        "drive_path": drive_path,
+        "music_app": music_app_running,
+        "itunes_cache": library_cache.status(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+@app.get("/api/config")
+async def get_config_endpoint():
+    return get_config()
+
+
+@app.put("/api/config")
+async def update_config_endpoint(body: dict):
+    current = get_config()
+    old_supabase = current.get("supabase", {}).copy()
+
+    for key, value in body.items():
+        if isinstance(value, dict) and isinstance(current.get(key), dict):
+            current[key].update(value)
+        else:
+            current[key] = value
+    save_config(current)
+
+    new_supabase = current.get("supabase", {})
+    supabase_changed = (
+        new_supabase.get("url") != old_supabase.get("url")
+        or new_supabase.get("anon_key") != old_supabase.get("anon_key")
+    )
+    supabase_ok = False
+    if supabase_changed and new_supabase.get("url") and new_supabase.get("anon_key"):
+        try:
+            init_supabase()
+            supabase_ok = validate_connection()
+            if supabase_ok:
+                logger.info("Supabase reconnected after config update")
+            else:
+                logger.warning("Supabase client created but connection check failed — verify schema")
+        except Exception as exc:
+            logger.error("Failed to reinitialize Supabase: %s", exc)
+
+    return {"ok": True, "supabase_reconnected": supabase_ok if supabase_changed else None}
+
+
+# ---------------------------------------------------------------------------
+# Spotify OAuth
+# ---------------------------------------------------------------------------
+
+@app.get("/api/spotify/auth-url")
+async def spotify_auth_url():
+    """Return the Spotify OAuth URL for the user to authorize the app."""
+    from spotify_monitor import get_auth_url
+
+    # #region agent log
+    import json, time
+    _log_path = Path(__file__).parent.parent / ".cursor" / "debug-750055.log"
+    # #endregion
+
+    try:
+        url = get_auth_url()
+
+        # #region agent log
+        with open(_log_path, "a") as _f:
+            _f.write(json.dumps({"sessionId":"750055","location":"main.py:spotify_auth_url","message":"Auth URL generated","data":{"url_length":len(url)},"timestamp":int(time.time()*1000),"hypothesisId":"H3"}) + "\n")
+        # #endregion
+
+        return {"url": url}
+    except RuntimeError as exc:
+
+        # #region agent log
+        with open(_log_path, "a") as _f:
+            _f.write(json.dumps({"sessionId":"750055","location":"main.py:spotify_auth_url","message":"Auth URL generation FAILED","data":{"error":str(exc)},"timestamp":int(time.time()*1000),"hypothesisId":"H5"}) + "\n")
+        # #endregion
+
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/callback")
+async def spotify_callback(code: str):
+    """Exchange the authorization code for tokens, then redirect to frontend."""
+    from fastapi.responses import RedirectResponse
+    from spotify_monitor import exchange_code
+
+    # #region agent log
+    import json, time
+    _log_path = Path(__file__).parent.parent / ".cursor" / "debug-750055.log"
+    with open(_log_path, "a") as _f:
+        _f.write(json.dumps({"sessionId":"750055","location":"main.py:spotify_callback","message":"Spotify callback received","data":{"code_length":len(code) if code else 0},"timestamp":int(time.time()*1000),"hypothesisId":"H2"}) + "\n")
+    # #endregion
+
+    try:
+        exchange_code(code)
+
+        # #region agent log
+        with open(_log_path, "a") as _f:
+            _f.write(json.dumps({"sessionId":"750055","location":"main.py:spotify_callback","message":"Spotify token exchange succeeded","data":{},"timestamp":int(time.time()*1000),"hypothesisId":"H2"}) + "\n")
+        # #endregion
+
+        return RedirectResponse(url="http://localhost:5173/?spotify=connected", status_code=302)
+    except Exception as exc:
+        logger.error("Spotify callback failed: %s", exc)
+
+        # #region agent log
+        with open(_log_path, "a") as _f:
+            _f.write(json.dumps({"sessionId":"750055","location":"main.py:spotify_callback","message":"Spotify token exchange FAILED","data":{"error":str(exc)},"timestamp":int(time.time()*1000),"hypothesisId":"H2"}) + "\n")
+        # #endregion
+
+        return RedirectResponse(url=f"http://localhost:5173/?spotify=error&detail={exc}", status_code=302)
+
+
+@app.get("/api/spotify/token")
+async def spotify_token():
+    """Return a valid access token for the Spotify Web Playback SDK."""
+    from fastapi import HTTPException
+    from spotify_monitor import get_access_token
+
+    try:
+        token = await asyncio.to_thread(get_access_token)
+        return {"access_token": token}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+
+
+@app.get("/api/spotify/status")
+async def spotify_status():
+    """Check whether the app has a valid cached Spotify token with required scopes."""
+    from spotify_monitor import is_authenticated, has_streaming_scope
+    authenticated = is_authenticated()
+    return {
+        "authenticated": authenticated,
+        "has_streaming_scope": has_streaming_scope() if authenticated else False,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Playlists
+# ---------------------------------------------------------------------------
+
+@app.get("/api/playlists")
+async def list_playlists():
+    """Return the current user's Spotify playlists."""
+    from spotify_monitor import fetch_user_playlists
+    return await asyncio.to_thread(fetch_user_playlists)
+
+
+# ---------------------------------------------------------------------------
+# Scan
+# ---------------------------------------------------------------------------
+
+@app.post("/api/scan")
+async def scan_playlists(body: dict | None = None):
+    """Scan Spotify playlists for new tracks.
+
+    Body (optional): {"playlist_ids": ["id1", "id2"]}
+    Falls back to config.monitored_playlists when no IDs provided.
+    """
+    from fastapi import HTTPException
+    from spotify_monitor import scan_monitored_playlists
+
+    # #region agent log
+    import json as _json, time as _time
+    _log_path = Path(__file__).parent.parent / ".cursor" / "debug-5d0c12.log"
+    # #endregion
+
+    playlist_ids = (body or {}).get("playlist_ids")
+
+    # #region agent log
+    with open(_log_path, "a") as _f:
+        _f.write(_json.dumps({"sessionId":"5d0c12","location":"main.py:scan_playlists","message":"Scan endpoint called","data":{"playlist_ids":playlist_ids},"timestamp":int(_time.time()*1000),"hypothesisId":"H2"}) + "\n")
+    # #endregion
+
+    try:
+        results = await scan_monitored_playlists(playlist_ids)
+        # #region agent log
+        with open(_log_path, "a") as _f:
+            _f.write(_json.dumps({"sessionId":"5d0c12","location":"main.py:scan_playlists","message":"Scan completed successfully","data":{"result_count":len(results),"results":results},"timestamp":int(_time.time()*1000),"hypothesisId":"H5"}) + "\n")
+        # #endregion
+    except ValueError as exc:
+        # #region agent log
+        with open(_log_path, "a") as _f:
+            _f.write(_json.dumps({"sessionId":"5d0c12","location":"main.py:scan_playlists","message":"Scan ValueError","data":{"error":str(exc)},"timestamp":int(_time.time()*1000),"hypothesisId":"H5"}) + "\n")
+        # #endregion
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        # #region agent log
+        with open(_log_path, "a") as _f:
+            _f.write(_json.dumps({"sessionId":"5d0c12","location":"main.py:scan_playlists","message":"Scan RuntimeError","data":{"error":str(exc)},"timestamp":int(_time.time()*1000),"hypothesisId":"H5"}) + "\n")
+        # #endregion
+        raise HTTPException(status_code=401, detail=str(exc))
+    except Exception as exc:
+        # #region agent log
+        with open(_log_path, "a") as _f:
+            _f.write(_json.dumps({"sessionId":"5d0c12","location":"main.py:scan_playlists","message":"Scan unexpected exception","data":{"error":str(exc),"type":type(exc).__name__},"timestamp":int(_time.time()*1000),"hypothesisId":"H5"}) + "\n")
+        # #endregion
+        raise
+    return {"ok": True, "results": results}
+
+
+# ---------------------------------------------------------------------------
+# Tracks (basic CRUD — expanded in later phases)
+# ---------------------------------------------------------------------------
+
+ACTIVE_STATUSES = ["new", "approved", "carted", "cart_failed", "processing"]
+
+
+@app.get("/api/tracks")
+async def list_tracks(status: str | None = None, search: str | None = None):
+    """List tracks. Filter by status or search by name/artist."""
+    from database import get_tracks_by_status, get_tracks_by_statuses, search_tracks
+
+    if search:
+        return await asyncio.to_thread(search_tracks, search)
+    if status:
+        return await asyncio.to_thread(get_tracks_by_status, status)
+    return await asyncio.to_thread(get_tracks_by_statuses, ACTIVE_STATUSES)
+
+
+@app.get("/api/tracks/counts")
+async def track_counts():
+    """Return track counts grouped by status for dashboard badges."""
+    from database import get_track_counts_by_status
+    return await asyncio.to_thread(get_track_counts_by_status)
+
+
+@app.patch("/api/tracks/{track_id}")
+async def update_track(track_id: int, body: dict):
+    from database import update_track_fields
+    result = await asyncio.to_thread(update_track_fields, track_id, body)
+    if not result:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=404, content={"error": f"Track {track_id} not found"})
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Link Resolver
+# ---------------------------------------------------------------------------
+
+@app.post("/api/resolve")
+async def resolve_links(body: dict | None = None):
+    """Resolve Beatport/Traxsource links for tracks.
+
+    Body (all fields optional)::
+
+        {
+            "track_ids": [1, 2, 3]   // specific tracks; omit to resolve all "new" tracks
+        }
+
+    Runs asynchronously in a background task; WebSocket events
+    ``resolve_progress`` and ``resolve_complete`` stream updates.
+    """
+    from link_resolver import resolve_tracks
+
+    track_ids = (body or {}).get("track_ids")
+    result = await resolve_tracks(track_ids)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Cart Builder
+# ---------------------------------------------------------------------------
+
+@app.post("/api/cart/build")
+async def build_cart_endpoint(body: dict):
+    """Launch a Playwright cart-building session for a store.
+
+    Body: {"store": "beatport" | "traxsource"}
+
+    Runs in a background thread so it doesn't block the event loop.
+    Progress streams via WebSocket events: cart_started, cart_progress,
+    cart_track_result, cart_complete, cart_error.
+    """
+    from fastapi import HTTPException
+    from cart_builder import build_cart, is_running
+
+    store = body.get("store")
+    if store not in ("beatport", "traxsource"):
+        raise HTTPException(
+            status_code=400,
+            detail="store must be 'beatport' or 'traxsource'",
+        )
+
+    if is_running(store):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cart build already running for {store}",
+        )
+
+    asyncio.create_task(asyncio.to_thread(build_cart, store))
+
+    return {"ok": True, "message": f"Cart build started for {store}"}
+
+
+@app.get("/api/cart/status")
+async def cart_status():
+    """Check whether a cart build is currently running."""
+    from cart_builder import is_running
+    return {
+        "beatport": is_running("beatport"),
+        "traxsource": is_running("traxsource"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# iTunes Library
+# ---------------------------------------------------------------------------
+
+@app.get("/api/library/status")
+async def library_status():
+    """Return current state of the in-memory iTunes library cache."""
+    return library_cache.status()
+
+
+@app.post("/api/library/scan")
+async def library_scan():
+    """Trigger a fresh scan of the Apple Music library."""
+    if library_cache.is_scanning:
+        return {"ok": False, "message": "Scan already in progress"}
+    count = await asyncio.to_thread(library_cache.scan)
+    return {"ok": True, "track_count": count}
+
+
+# ---------------------------------------------------------------------------
+# iTunes Playlists
+# ---------------------------------------------------------------------------
+
+@app.get("/api/library/playlists")
+async def library_playlists():
+    """Return all user playlist names from Apple Music."""
+    from itunes_bridge import get_all_playlists
+    playlists = await asyncio.to_thread(get_all_playlists)
+    return {"playlists": playlists}
+
+
+@app.post("/api/tracks/{track_id}/add-to-playlists")
+async def add_track_to_playlists(track_id: int):
+    """Add an already-imported track to its target playlists in Apple Music.
+
+    Useful when the user assigns playlists after the track is already ``done``.
+    Reads the track's ``target_playlists`` from the database, then uses
+    AppleScript to find the track in the library and duplicate it to each playlist.
+    """
+    from fastapi import HTTPException
+    from database import get_supabase
+    from itunes_bridge import add_existing_track_to_playlist, is_music_app_running as music_running
+
+    if not await asyncio.to_thread(music_running):
+        raise HTTPException(status_code=503, detail="Apple Music is not running")
+
+    result = get_supabase().table("tracks").select("*").eq("id", track_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail=f"Track {track_id} not found")
+    track = result.data[0]
+
+    playlists: list[str] = track.get("target_playlists") or []
+    if not playlists:
+        raise HTTPException(status_code=400, detail="No target playlists assigned to this track")
+
+    results: dict[str, bool] = {}
+    for pl in playlists:
+        ok = await asyncio.to_thread(
+            add_existing_track_to_playlist,
+            track["track_name"],
+            track["artist_name"],
+            pl,
+        )
+        results[pl] = ok
+
+    return {"ok": True, "results": results}
+
+
+# ---------------------------------------------------------------------------
+# File Pipeline
+# ---------------------------------------------------------------------------
+
+@app.get("/api/pipeline/status")
+async def pipeline_status():
+    """Return current state of the file-watch pipeline."""
+    return pipeline.status()
+
+
+@app.post("/api/pipeline/assign")
+async def pipeline_assign(body: dict):
+    """Manually assign an unmatched file to a specific track.
+
+    Body: {"filepath": "/path/to/file.wav", "track_id": 123}
+    """
+    from fastapi import HTTPException
+
+    filepath = body.get("filepath")
+    track_id = body.get("track_id")
+    if not filepath or not track_id:
+        raise HTTPException(status_code=400, detail="filepath and track_id are required")
+
+    try:
+        result = await asyncio.to_thread(pipeline.assign_file, filepath, int(track_id))
+        return result
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))

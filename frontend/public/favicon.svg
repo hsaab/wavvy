@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- Outer vinyl ring -->
+  <circle cx="32" cy="32" r="30" stroke="#4f8fff" stroke-width="2.5" fill="#0f0f1a"/>
+  <!-- Groove rings -->
+  <circle cx="32" cy="32" r="24" stroke="#1e2a47" stroke-width="1" fill="none"/>
+  <circle cx="32" cy="32" r="20" stroke="#1e2a47" stroke-width="0.75" fill="none"/>
+  <circle cx="32" cy="32" r="16" stroke="#1e2a47" stroke-width="0.75" fill="none"/>
+  <!-- Label area -->
+  <circle cx="32" cy="32" r="10" fill="#1a1a2e" stroke="#4f8fff" stroke-width="1.5"/>
+  <!-- Spindle hole -->
+  <circle cx="32" cy="32" r="3" fill="#4f8fff"/>
+  <!-- Waveform bars overlaid on vinyl -->
+  <g opacity="0.6">
+    <rect x="42" y="22" width="2.5" height="20" rx="1.25" fill="#4f8fff"/>
+    <rect x="47" y="18" width="2.5" height="28" rx="1.25" fill="#4f8fff"/>
+    <rect x="52" y="24" width="2.5" height="16" rx="1.25" fill="#4f8fff"/>
+  </g>
+</svg>

@@ -1,0 +1,146 @@
+# DJ Track Pipeline — Cursor Rules
+
+## Project Context
+This is a local Mac application for a DJ/producer. It monitors Spotify playlists for new tracks, finds purchase links on Beatport/Traxsource, and automates the post-download workflow: moving files to an external drive, organizing by genre, and adding to iTunes playlists via AppleScript.
+
+## Critical Constraints — Do NOT Violate These
+
+### Audio Format
+- **WAV only.** Never convert, transcode, re-encode, or modify audio files in any way.
+- No ffmpeg, no pydub, no audio processing libraries. Files move as-is.
+- If a file is not .wav, leave it alone and flag it in the UI.
+
+### Platform
+- This runs on **macOS only**. Use Mac-native paths and conventions.
+- External drive path: `/Volumes/My Passport/Music/iTunes/iTunes Media/Music/Unknown Artist/Unknown Album` (configurable, but default to this)
+- Downloads folder: `~/Downloads` (configurable)
+- iTunes/Apple Music integration via AppleScript executed through `osascript`
+
+### Local App, Cloud Database
+- The app itself runs locally on Mac. No Docker, no cloud deployment.
+- **Database is Supabase** (free tier Postgres). No local DB files.
+- Supabase credentials (URL + anon key) live in `config.json`, never hardcoded.
+- Use `supabase-py` Python client for all database operations.
+- Frontend served locally via Vite dev server or static build.
+
+## Tech Stack — Stick To These
+
+### Backend
+- **Python 3.11+**
+- **FastAPI** for the API server
+- **spotipy** for Spotify OAuth + playlist access
+- **httpx** for async HTTP requests (Odesli, scraping)
+- **beautifulsoup4** for HTML parsing (Beatport/Traxsource search results)
+- **thefuzz** (formerly fuzzywuzzy) for fuzzy string matching
+- **watchdog** for filesystem monitoring
+- **supabase-py** for database (Supabase free tier Postgres)
+- **playwright** for browser automation (cart building on Beatport/Traxsource)
+- **python-dotenv** for loading credentials from `.env`
+- **pync** or osascript for macOS notifications
+
+### Frontend
+- **React** with **Vite**
+- **Tailwind CSS** for styling
+- Dark theme — think rekordbox aesthetic. Dark grays (#1a1a2e, #16213e), accent color for active states.
+- No component library (no MUI, no Chakra). Keep it minimal with Tailwind.
+- Use `fetch` for API calls. No axios needed.
+
+### Do NOT introduce:
+- SQLAlchemy or any ORM (use supabase-py client directly)
+- SQLite (database is Supabase, not local)
+- Selenium (use Playwright instead)
+- Docker or containerization
+- TypeScript (plain JS/JSX is fine for this scope)
+- Any audio processing or conversion libraries
+- Electron or Tauri (this is a browser-based local UI)
+- Next.js, Remix, or any SSR framework
+
+## Code Style
+
+### Python
+- Type hints on all function signatures
+- Async where it makes sense (API routes, HTTP requests), sync is fine for file ops
+- Use pathlib.Path for all file paths, never string concatenation
+- Group imports: stdlib → third-party → local modules
+- Docstrings on public functions, but keep them short (one line if possible)
+- Error handling: catch specific exceptions, never bare `except:`
+- Logging over print statements — use Python's `logging` module
+
+### React/Frontend
+- Functional components with hooks only. No class components.
+- Keep state management simple — useState and useEffect. No Redux, no Zustand.
+- One component per file
+- API calls in a centralized `api.js` helper file
+- Show loading and error states for every async operation
+
+### AppleScript Integration
+- All AppleScript lives in `itunes_bridge.py`, nowhere else
+- Every AppleScript command should have a Python wrapper function
+- Always check if Music app is running before executing
+- Handle the case where a playlist doesn't exist (create it)
+- AppleScript strings must be properly escaped — watch out for quotes and special characters in track names
+
+## File Organization Conventions
+- Files are placed directly into the external drive path — no genre subfolders
+- Genre categories: "Disco+Melodic", "House", "Worldtech", "Tech House"
+- Playlist names in iTunes must match EXACTLY (case-sensitive)
+
+## Database Conventions
+- Supabase free-tier Postgres via `supabase-py`
+- All database calls in `database.py` as helper functions wrapping supabase client
+- Use supabase-py's query builder
+- Never write raw SQL in application code (schema setup is in Supabase SQL editor)
+- Track status flow: new → approved → carted → purchased → processing → done | skipped | cart_failed | baseline
+- Skipped tracks are permanent — they never resurface in the queue unless manually un-skipped
+- Baseline tracks are from the first scan of a playlist — they existed before monitoring started
+- spotify_id is the unique identifier — never duplicate
+
+## Cart Builder (Playwright) Conventions
+- All Playwright automation lives in `cart_builder.py`
+- All CSS/text selectors for Beatport and Traxsource live in `selectors.py`
+- **Always headed mode** — never headless
+- Save browser context/cookies to avoid re-login on every run
+- Prefer text selectors over CSS class selectors
+- 1-2 second pause between track additions to avoid rate limiting
+- If a track fails to add to cart, mark as `cart_failed` and continue — never crash the batch
+- Cart builder does NOT checkout or make payments — it builds the cart and stops
+- Credentials come from `.env` via `python-dotenv`, never from config.json
+
+## Credentials & Secrets
+- Store credentials in `.env` file at project root
+- `.env` MUST be in `.gitignore`
+- Load with `python-dotenv`
+- Access via `os.environ["BEATPORT_EMAIL"]` etc.
+- NEVER hardcode credentials, NEVER put them in config.json
+- Spotify client_id/secret can stay in config.json (they're app-level, not personal login)
+
+## iTunes Library Deduplication
+- On startup, scan iTunes/Music library via AppleScript to build an in-memory set
+- All iTunes scanning logic lives in `itunes_scanner.py`, separate from `itunes_bridge.py`
+- Use fuzzy matching (thefuzz, threshold 90%) when comparing metadata
+- After the file pipeline adds a track to iTunes, also add it to the in-memory set immediately
+- Expose a "Refresh Library" button in the UI that re-runs the scan
+- Never persist the iTunes library contents to Supabase — it's local-only ephemeral cache
+
+## API Design
+- RESTful routes under `/api/`
+- `/api/tracks` — GET (list with filters), PATCH (update status/genre)
+- `/api/playlists` — GET (list monitored playlists)
+- `/api/scan` — POST (trigger a Spotify scan)
+- `/api/config` — GET/PUT (read and update settings)
+- `/api/resolve` — POST (trigger link resolution for a track)
+- Return JSON. Use FastAPI's response models where it keeps things clean.
+
+## Error Handling Priorities
+1. **Passport not mounted** — most common issue. Always check before file ops. Surface clearly in UI.
+2. **Spotify token expired** — handle refresh automatically via spotipy
+3. **Beatport/Traxsource scraping fails** — degrade gracefully, mark as not_found, don't crash
+4. **File watcher false positives** — ignore non-WAV, ignore temp files, wait for stable file size
+5. **iTunes playlist not found** — create it rather than failing
+
+## UI Priorities
+- The Track Queue is the main screen. It should load fast and be the default view.
+- Batch actions are important — "open all approved links" should be prominent
+- Genre assignment should be fast — dropdown or button group, not a modal
+- Status badges should be visually distinct (color-coded)
+- Settings is a secondary screen, doesn't need to be fancy
