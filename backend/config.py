@@ -1,9 +1,15 @@
-"""Configuration loading and saving from config.json."""
+"""Configuration loading and saving.
+
+Sensitive credentials (Supabase, Spotify) are read from environment variables
+loaded via python-dotenv.  Non-secret preferences (paths, playlists, polling)
+live in config.json.
+"""
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -12,15 +18,6 @@ logger = logging.getLogger(__name__)
 CONFIG_PATH = Path(__file__).parent.parent / "config.json"
 
 _DEFAULT_CONFIG: dict[str, Any] = {
-    "spotify": {
-        "client_id": "",
-        "client_secret": "",
-        "redirect_uri": "http://127.0.0.1:8888/callback",
-    },
-    "supabase": {
-        "url": "",
-        "anon_key": "",
-    },
     "monitored_playlists": [],
     "downloads_folder": "~/Downloads",
     "external_drive_path": "/Volumes/My Passport/Music/iTunes/iTunes Media/Music/Unknown Artist/Unknown Album",
@@ -65,3 +62,24 @@ def get_config() -> dict[str, Any]:
     if not _config:
         return load_config()
     return _config
+
+
+# ---------------------------------------------------------------------------
+# Environment-based credential helpers
+# ---------------------------------------------------------------------------
+
+def get_supabase_creds() -> dict[str, str]:
+    """Return Supabase URL and anon key from environment variables."""
+    return {
+        "url": os.environ.get("SUPABASE_URL", ""),
+        "anon_key": os.environ.get("SUPABASE_ANON_KEY", ""),
+    }
+
+
+def get_spotify_creds() -> dict[str, str]:
+    """Return Spotify client credentials from environment variables."""
+    return {
+        "client_id": os.environ.get("SPOTIFY_CLIENT_ID", ""),
+        "client_secret": os.environ.get("SPOTIFY_CLIENT_SECRET", ""),
+        "redirect_uri": os.environ.get("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8888/callback"),
+    }

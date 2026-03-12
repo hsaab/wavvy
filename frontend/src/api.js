@@ -70,6 +70,9 @@ export const updateConfig = (config) =>
     body: JSON.stringify(config),
   });
 
+// Credentials status (env-based secrets)
+export const getCredentialsStatus = () => request("/api/credentials/status");
+
 // Spotify auth & playback
 export const getSpotifyStatus = () => request("/api/spotify/status");
 
