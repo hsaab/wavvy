@@ -18,7 +18,7 @@ from itunes_bridge import is_music_app_running
 from itunes_scanner import library_cache
 from ws_manager import manager
 
-load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -223,6 +223,9 @@ async def scan_playlists(body: dict | None = None):
 
     Body (optional): {"playlist_ids": ["id1", "id2"]}
     Falls back to config.monitored_playlists when no IDs provided.
+
+    After the scan, automatically resolves Beatport/Traxsource links
+    for any newly discovered tracks as a background task.
     """
     from fastapi import HTTPException
     from spotify_monitor import scan_monitored_playlists
@@ -235,7 +238,23 @@ async def scan_playlists(body: dict | None = None):
         raise HTTPException(status_code=400, detail=str(exc))
     except RuntimeError as exc:
         raise HTTPException(status_code=401, detail=str(exc))
+
+    total_new = sum(r.get("new", 0) for r in results)
+    if total_new > 0:
+        asyncio.create_task(_auto_resolve_new_tracks())
+
     return {"ok": True, "results": results}
+
+
+async def _auto_resolve_new_tracks() -> None:
+    """Background task: resolve links for all tracks with status 'new'."""
+    from link_resolver import resolve_tracks
+
+    try:
+        logger.info("Auto-resolving links for new tracks after scan")
+        await resolve_tracks(None)
+    except Exception as exc:
+        logger.error("Auto link resolution failed: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -308,12 +327,14 @@ async def build_cart_endpoint(body: dict):
 
     Body: {"store": "beatport" | "traxsource"}
 
-    Runs in a background thread so it doesn't block the event loop.
-    Progress streams via WebSocket events: cart_started, cart_progress,
-    cart_track_result, cart_complete, cart_error.
+    Automatically resolves missing store links for approved tracks before
+    starting the cart build.  Runs in a background thread so it doesn't
+    block the event loop.  Progress streams via WebSocket events.
     """
     from fastapi import HTTPException
     from cart_builder import build_cart, is_running
+    from database import get_tracks_by_status
+    from link_resolver import resolve_tracks
 
     store = body.get("store")
     if store not in ("beatport", "traxsource"):
@@ -326,6 +347,34 @@ async def build_cart_endpoint(body: dict):
         raise HTTPException(
             status_code=409,
             detail=f"Cart build already running for {store}",
+        )
+
+    url_field = "beatport_url" if store == "beatport" else "traxsource_url"
+    approved = await asyncio.to_thread(get_tracks_by_status, "approved")
+
+    if not approved:
+        raise HTTPException(
+            status_code=400,
+            detail="No approved tracks. Select tracks and approve them first, then try again.",
+        )
+
+    unresolved = [t for t in approved if not t.get(url_field)]
+
+    if unresolved:
+        unresolved_ids = [t["id"] for t in unresolved]
+        logger.info(
+            "Auto-resolving links for %d approved track(s) before %s cart build",
+            len(unresolved_ids), store,
+        )
+        await resolve_tracks(unresolved_ids)
+
+    refreshed = await asyncio.to_thread(get_tracks_by_status, "approved")
+    eligible = [t for t in refreshed if t.get(url_field)]
+    if not eligible:
+        store_label = "Beatport" if store == "beatport" else "Traxsource"
+        raise HTTPException(
+            status_code=400,
+            detail=f"No approved tracks have {store_label} links. Resolve links first, then try again.",
         )
 
     asyncio.create_task(asyncio.to_thread(build_cart, store))

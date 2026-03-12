@@ -15,6 +15,10 @@ trap cleanup SIGINT SIGTERM
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Load nvm so node/npm are available
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+
 # Start backend
 echo "Starting backend on http://127.0.0.1:8888 ..."
 source "$DIR/.venv/bin/activate"

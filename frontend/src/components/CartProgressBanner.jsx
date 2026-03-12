@@ -25,13 +25,16 @@ export default function CartProgressBanner({ cartState }) {
   }
 
   if (phase === "done") {
+    const isEmpty = total === 0 && (cartState.added ?? 0) === 0;
     return (
-      <div className={`rounded-lg border ${colors.border} ${colors.bg} px-4 py-3 flex items-center gap-3`}>
-        <span className={`${colors.text} text-sm font-medium`}>
-          {storeLabel} cart complete
+      <div className={`rounded-lg border ${isEmpty ? "border-yellow-500/30 bg-yellow-500/10" : `${colors.border} ${colors.bg}`} px-4 py-3 flex items-center gap-3`}>
+        <span className={`${isEmpty ? "text-yellow-400" : colors.text} text-sm font-medium`}>
+          {isEmpty ? `No eligible tracks for ${storeLabel}` : `${storeLabel} cart complete`}
         </span>
         <span className="text-gray-400 text-xs">
-          {cartState.added} added{cartState.failed > 0 ? `, ${cartState.failed} failed` : ""}
+          {isEmpty
+            ? "Approve tracks and resolve links first"
+            : `${cartState.added} added${cartState.failed > 0 ? `, ${cartState.failed} failed` : ""}`}
         </span>
       </div>
     );
