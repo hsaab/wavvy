@@ -1,13 +1,4 @@
 {
-  "spotify": {
-    "client_id": "your-spotify-client-id",
-    "client_secret": "your-spotify-client-secret",
-    "redirect_uri": "http://127.0.0.1:8888/callback"
-  },
-  "supabase": {
-    "url": "https://your-project.supabase.co",
-    "anon_key": "your-supabase-anon-key"
-  },
   "monitored_playlists": [],
   "downloads_folder": "~/Downloads",
   "external_drive_path": "/Volumes/My Passport/Music/iTunes/iTunes Media/Music/Unknown Artist/Unknown Album",
@@ -19,6 +10,7 @@
   },
   "poll_interval_minutes": 30,
   "file_watch_enabled": true,
+  "auto_scan_playlists": [],
   "genre_folders": {
     "Disco+Melodic": "Disco & Melodic",
     "House": "House",

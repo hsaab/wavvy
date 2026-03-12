@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import useWebSocket from "./hooks/useWebSocket";
-import { getHealth, scanLibrary } from "./api";
+import { getHealth, scanLibrary, getConfig, getSpotifyStatus, getPlaylists, triggerScan } from "./api";
 import { PlayerProvider } from "./context/PlayerContext";
 import TrackQueue from "./components/TrackQueue";
 import SkippedTracks from "./components/SkippedTracks";
@@ -73,6 +73,36 @@ export default function App() {
     const id = setInterval(fetchHealth, 30_000);
     return () => clearInterval(id);
   }, []);
+
+  /* Auto-scan configured playlists once per session */
+  const autoScannedRef = useRef(false);
+  useEffect(() => {
+    if (autoScannedRef.current) return;
+    autoScannedRef.current = true;
+
+    (async () => {
+      try {
+        const config = await getConfig();
+        const names = config.auto_scan_playlists;
+        if (!names || names.length === 0) return;
+
+        const { authenticated } = await getSpotifyStatus();
+        if (!authenticated) return;
+
+        const playlists = await getPlaylists();
+        const lowerNames = new Set(names.map((n) => n.toLowerCase()));
+        const matched = playlists.filter((pl) =>
+          lowerNames.has(pl.name.toLowerCase())
+        );
+        if (matched.length === 0) return;
+
+        addToast(`Auto-scanning ${matched.length} playlist(s)...`, "info");
+        await triggerScan(matched.map((pl) => pl.id));
+      } catch {
+        /* auto-scan is best-effort; failures are silent */
+      }
+    })();
+  }, [addToast]);
 
   const handleRefreshLibrary = async () => {
     setRefreshingLibrary(true);

@@ -11,7 +11,7 @@ from typing import Any
 
 from supabase import Client, create_client
 
-from config import get_config
+from config import get_supabase_creds
 
 logger = logging.getLogger(__name__)
 
@@ -19,13 +19,13 @@ _supabase: Client | None = None
 
 
 def init_supabase() -> Client:
-    """Initialize the Supabase client from config. Call once at startup."""
+    """Initialize the Supabase client from environment variables."""
     global _supabase
-    cfg = get_config()["supabase"]
-    if not cfg.get("url") or not cfg.get("anon_key"):
-        raise RuntimeError("Supabase URL and anon_key must be set in config.json")
-    _supabase = create_client(cfg["url"], cfg["anon_key"])
-    logger.info("Supabase client initialized for %s", cfg["url"])
+    creds = get_supabase_creds()
+    if not creds["url"] or not creds["anon_key"]:
+        raise RuntimeError("SUPABASE_URL and SUPABASE_ANON_KEY must be set in .env")
+    _supabase = create_client(creds["url"], creds["anon_key"])
+    logger.info("Supabase client initialized for %s", creds["url"])
     return _supabase
 
 
@@ -53,8 +53,7 @@ def validate_connection() -> bool:
 
 def get_tracks_by_status(status: str) -> list[dict[str, Any]]:
     """Fetch all tracks matching a given status."""
-    result = get_supabase().table("tracks").select("*").eq("status", status).execute()
-    return result.data
+    return _paginated_select("tracks", "*", status=status)
 
 
 def get_tracks_by_statuses(
@@ -63,15 +62,24 @@ def get_tracks_by_statuses(
     ascending: bool = False,
 ) -> list[dict[str, Any]]:
     """Fetch tracks matching any of the given statuses, sorted."""
-    result = (
-        get_supabase()
-        .table("tracks")
-        .select("*")
-        .in_("status", statuses)
-        .order(order_by, desc=not ascending)
-        .execute()
-    )
-    return result.data
+    all_rows: list[dict[str, Any]] = []
+    page_size = 1000
+    offset = 0
+    while True:
+        result = (
+            get_supabase()
+            .table("tracks")
+            .select("*")
+            .in_("status", statuses)
+            .order(order_by, desc=not ascending)
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        all_rows.extend(result.data)
+        if len(result.data) < page_size:
+            break
+        offset += page_size
+    return all_rows
 
 
 def get_track_by_spotify_id(spotify_id: str) -> dict[str, Any] | None:
@@ -182,11 +190,27 @@ def search_tracks(query: str) -> list[dict[str, Any]]:
     return result.data
 
 
+def _paginated_select(table: str, columns: str, page_size: int = 1000, **filters: Any) -> list[dict[str, Any]]:
+    """Fetch all rows from a table, paginating past the PostgREST 1000-row default."""
+    all_rows: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        query = get_supabase().table(table).select(columns).range(offset, offset + page_size - 1)
+        for col, val in filters.items():
+            query = query.eq(col, val)
+        result = query.execute()
+        all_rows.extend(result.data)
+        if len(result.data) < page_size:
+            break
+        offset += page_size
+    return all_rows
+
+
 def get_track_counts_by_status() -> dict[str, int]:
     """Return a mapping of status -> count for dashboard summaries."""
-    result = get_supabase().table("tracks").select("status").execute()
+    rows = _paginated_select("tracks", "status")
     counts: dict[str, int] = {}
-    for row in result.data:
+    for row in rows:
         s = row["status"]
         counts[s] = counts.get(s, 0) + 1
     return counts

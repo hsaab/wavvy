@@ -17,8 +17,8 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Start backend
 echo "Starting backend on http://127.0.0.1:8888 ..."
+source "$DIR/.venv/bin/activate"
 cd "$DIR/backend"
-source venv/bin/activate
 uvicorn main:app --reload --port 8888 &
 BACKEND_PID=$!
 

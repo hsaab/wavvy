@@ -1,6 +1,6 @@
 """Playwright-based cart builder for Beatport and Traxsource.
 
-Launches a headless Chromium browser, logs in, iterates approved tracks,
+Launches a headed Chromium browser, logs in, iterates approved tracks,
 selects WAV format, and adds each to the cart.  Failures are marked
 ``cart_failed`` without crashing the batch.
 
@@ -30,22 +30,14 @@ from database import get_tracks_by_status, update_track_status
 from notifications import notify_cart_ready, notify_error
 from ws_manager import manager
 
-import json as _j
-import time as _t
-_log_path = "/Users/hassansaab/apps/music-is-the-answer/.cursor/debug-76d8a3.log"
-def _dlog(loc, msg, data, hyp):
-    try:
-        with open(_log_path, "a") as _f:
-            _f.write(_j.dumps({"sessionId":"76d8a3","location":loc,"message":msg,"data":data,"hypothesisId":hyp,"timestamp":int(_t.time()*1000)}) + "\n")
-    except Exception:
-        pass
 from store_selectors import (
     BEATPORT_BASE_URL,
-    BEATPORT_LOGIN_URL,
+    BEATPORT_AUTH_URL,
     BEATPORT_CART_URL,
+    BP_LOGIN_TRIGGER,
     BP_EMAIL_INPUT,
     BP_PASSWORD_INPUT,
-    BP_LOGIN_BUTTON,
+    BP_LOGIN_SUBMIT,
     BP_LOGGED_IN_INDICATOR,
     BP_FORMAT_DROPDOWN,
     BP_WAV_OPTION,
@@ -119,21 +111,46 @@ def _dismiss_cookie_banner(page: Page, selector: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _beatport_login(page: Page) -> bool:
-    """Log in to Beatport using .env credentials. Returns True on success."""
-    email = os.environ.get("BEATPORT_EMAIL", "")
+    """Log in to Beatport via homepage modal → OAuth redirect → account.beatport.com."""
+    username = os.environ.get("BEATPORT_EMAIL", "")
     password = os.environ.get("BEATPORT_PASSWORD", "")
-    if not email or not password:
+    if not username or not password:
         logger.error("BEATPORT_EMAIL / BEATPORT_PASSWORD not set in .env")
         return False
 
-    page.goto(BEATPORT_LOGIN_URL, timeout=NAV_TIMEOUT_MS)
+    # Step 1: Go to homepage and open login modal
+    page.goto(BEATPORT_BASE_URL, timeout=NAV_TIMEOUT_MS)
     time.sleep(PAGE_LOAD_WAIT_SEC)
     _dismiss_cookie_banner(page, BP_COOKIE_ACCEPT)
 
-    page.locator(BP_EMAIL_INPUT).first.fill(email)
+    try:
+        page.locator(BP_LOGIN_TRIGGER).first.click(timeout=5_000)
+    except PlaywrightTimeout:
+        logger.error("Login trigger not found on Beatport homepage")
+        return False
+
+    # Step 3: Wait for redirect to account.beatport.com, fill credentials
+    try:
+        page.wait_for_url(f"{BEATPORT_AUTH_URL}/**", timeout=NAV_TIMEOUT_MS)
+    except PlaywrightTimeout:
+        logger.error("Did not redirect to account.beatport.com")
+        return False
+
+    time.sleep(PAGE_LOAD_WAIT_SEC)
+
+    page.locator(BP_EMAIL_INPUT).first.fill(username)
     page.locator(BP_PASSWORD_INPUT).first.fill(password)
-    page.locator(BP_LOGIN_BUTTON).first.click()
-    time.sleep(LOGIN_WAIT_SEC)
+    page.locator(BP_LOGIN_SUBMIT).first.click()
+
+    # Step 4: Wait for OAuth redirect back to beatport.com
+    try:
+        page.wait_for_url(f"{BEATPORT_BASE_URL}/**", timeout=NAV_TIMEOUT_MS)
+    except PlaywrightTimeout:
+        logger.warning("Did not redirect back to Beatport after login")
+        return False
+
+    time.sleep(PAGE_LOAD_WAIT_SEC)
+    _dismiss_cookie_banner(page, BP_COOKIE_ACCEPT)
 
     if page.locator(BP_LOGGED_IN_INDICATOR).first.is_visible(timeout=5_000):
         logger.info("Beatport login successful")
@@ -147,20 +164,10 @@ def _beatport_is_logged_in(page: Page) -> bool:
     """Check if we already have a valid Beatport session."""
     page.goto(BEATPORT_BASE_URL, timeout=NAV_TIMEOUT_MS)
     time.sleep(PAGE_LOAD_WAIT_SEC)
-    # #region agent log
-    _dlog("cart_builder.py:is_logged_in", "Navigated to Beatport", {"url": page.url}, "H3")
-    # #endregion
     _dismiss_cookie_banner(page, BP_COOKIE_ACCEPT)
     try:
-        result = page.locator(BP_LOGGED_IN_INDICATOR).first.is_visible(timeout=5_000)
-        # #region agent log
-        _dlog("cart_builder.py:is_logged_in", "Login check result", {"is_logged_in": result, "url": page.url}, "H3")
-        # #endregion
-        return result
+        return page.locator(BP_LOGGED_IN_INDICATOR).first.is_visible(timeout=5_000)
     except PlaywrightTimeout:
-        # #region agent log
-        _dlog("cart_builder.py:is_logged_in", "Login check TIMED OUT", {}, "H3")
-        # #endregion
         return False
 
 
@@ -173,44 +180,24 @@ def _beatport_add_track(page: Page, track: dict[str, Any]) -> bool:
 
     page.goto(url, timeout=NAV_TIMEOUT_MS)
     time.sleep(PAGE_LOAD_WAIT_SEC)
-    # #region agent log
-    _dlog("cart_builder.py:add_track_nav", "Track page loaded", {"url": page.url, "track_id": track["id"]}, "H4,H5")
-    # #endregion
 
     try:
         dropdown = page.locator(BP_FORMAT_DROPDOWN).first
-        fmt_visible = dropdown.is_visible(timeout=3_000)
-        # #region agent log
-        _dlog("cart_builder.py:add_track_fmt", "Format dropdown check", {"visible": fmt_visible}, "H2")
-        # #endregion
-        if fmt_visible:
+        if dropdown.is_visible(timeout=3_000):
             dropdown.click()
             time.sleep(0.5)
             page.locator(BP_WAV_OPTION).first.click()
             time.sleep(0.5)
     except PlaywrightTimeout:
-        # #region agent log
-        _dlog("cart_builder.py:add_track_fmt", "Format dropdown NOT found", {}, "H2")
-        # #endregion
         logger.debug("No format dropdown found for %s — may default to WAV", url)
 
     try:
         cart_btn = page.locator(BP_ADD_TO_CART).first
-        # #region agent log
-        btn_count = page.locator(BP_ADD_TO_CART).count()
-        _dlog("cart_builder.py:add_track_cart", "Looking for Add-to-Cart button", {"selector": BP_ADD_TO_CART, "match_count": btn_count}, "H1")
-        # #endregion
         cart_btn.wait_for(state="visible", timeout=10_000)
         cart_btn.click()
-        # #region agent log
-        _dlog("cart_builder.py:add_track_cart", "Add-to-Cart CLICKED", {"track_id": track["id"]}, "H1")
-        # #endregion
         time.sleep(ACTION_DELAY_SEC)
         return True
     except PlaywrightTimeout:
-        # #region agent log
-        _dlog("cart_builder.py:add_track_cart", "Add-to-Cart TIMEOUT — button not found", {"url": page.url, "track_id": track["id"], "selector": BP_ADD_TO_CART}, "H1")
-        # #endregion
         logger.error("Add-to-cart button not found on %s", url)
         return False
 
@@ -376,9 +363,6 @@ def build_cart(store: Store) -> dict[str, Any]:
                 context.close()
     except Exception as exc:
         logger.exception("Cart build crashed for %s", store)
-        # #region agent log
-        _dlog("cart_builder.py:build_exception", "Cart build EXCEPTION", {"store": store, "error_type": type(exc).__name__, "error_str": str(exc)[:500]}, "H1,H3")
-        # #endregion
         _broadcast("cart_error", {"store": store, "error": str(exc)})
         notify_error("Cart Builder", f"{store}: {exc}")
         summary["error"] = str(exc)
@@ -393,7 +377,7 @@ def build_cart(store: Store) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _launch_browser(pw: Playwright, store: Store) -> tuple[BrowserContext, Page]:
-    """Launch headless Chromium, restoring session cookies if available."""
+    """Launch headed Chromium, restoring session cookies if available."""
     browser: Browser = pw.chromium.launch(headless=True)
 
     storage = str(BROWSER_STATE_PATH) if BROWSER_STATE_PATH.exists() else None

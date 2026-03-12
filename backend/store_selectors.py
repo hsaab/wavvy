@@ -11,14 +11,17 @@ shouldn't need to change.
 # ---------------------------------------------------------------------------
 
 BEATPORT_BASE_URL = "https://www.beatport.com"
-BEATPORT_LOGIN_URL = "https://www.beatport.com/account/login"
+BEATPORT_AUTH_URL = "https://account.beatport.com"
 BEATPORT_CART_URL = "https://www.beatport.com/cart"
 
-# Login page
-BP_EMAIL_INPUT = 'input[name="username"], input[type="email"]'
-BP_PASSWORD_INPUT = 'input[name="password"], input[type="password"]'
-BP_LOGIN_BUTTON = 'button[type="submit"]'
-BP_LOGGED_IN_INDICATOR = '[class*="account"], a[href*="/account"]'
+# Homepage login button (person icon / "Log In" link share this class)
+BP_LOGIN_TRIGGER = '.Button-style__ButtonStyled-sc-f1d733ca-0.link'
+
+# Auth page (account.beatport.com) — username/password form
+BP_EMAIL_INPUT = "#username"
+BP_PASSWORD_INPUT = "#password"
+BP_LOGIN_SUBMIT = 'button:has-text("Log In")'
+BP_LOGGED_IN_INDICATOR = ".account_avatar"
 
 # Search (fallback when we have no direct URL)
 BP_SEARCH_URL = "https://www.beatport.com/search?q={query}"

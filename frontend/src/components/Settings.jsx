@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { getConfig, updateConfig, getHealth, scanLibrary, getLibraryStatus, getSpotifyStatus, getSpotifyAuthUrl } from "../api";
+import { getConfig, updateConfig, getHealth, scanLibrary, getLibraryStatus, getSpotifyStatus, getSpotifyAuthUrl, getCredentialsStatus } from "../api";
 
 const INPUT_CLASS =
   "w-full bg-base-700 border border-base-600 text-gray-200 text-sm rounded " +
@@ -10,7 +10,6 @@ const LABEL_CLASS = "block text-xs font-medium text-gray-400 mb-1";
 const SECTION_CLASS =
   "bg-base-800 border border-base-600 rounded-lg p-5 space-y-4";
 
-const GENRES = ["Disco+Melodic", "House", "Worldtech", "Tech House"];
 
 export default function Settings() {
   const [config, setConfig] = useState(null);
@@ -23,20 +22,23 @@ export default function Settings() {
   const [libraryScanning, setLibraryScanning] = useState(false);
   const [spotifyAuth, setSpotifyAuth] = useState(null);
   const [spotifyConnecting, setSpotifyConnecting] = useState(false);
+  const [envCreds, setEnvCreds] = useState(null);
 
   const fetchConfig = useCallback(async () => {
     try {
       setError(null);
-      const [cfg, h, lib, spotStatus] = await Promise.all([
+      const [cfg, h, lib, spotStatus, creds] = await Promise.all([
         getConfig(),
         getHealth(),
         getLibraryStatus(),
         getSpotifyStatus().catch(() => ({ authenticated: false })),
+        getCredentialsStatus().catch(() => null),
       ]);
       setConfig(cfg);
       setHealth(h);
       setLibraryStatus(lib);
       setSpotifyAuth(spotStatus);
+      setEnvCreds(creds);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -116,13 +118,6 @@ export default function Settings() {
     });
   };
 
-  const updateMapping = (field, genre, value) => {
-    setConfig((prev) => {
-      const next = structuredClone(prev);
-      next[field][genre] = value;
-      return next;
-    });
-  };
 
   if (loading) {
     return (
@@ -162,12 +157,15 @@ export default function Settings() {
         onLibraryScan={handleLibraryScan}
       />
 
+      {/* Credentials from .env */}
+      <EnvCredentials envCreds={envCreds} />
+
       {/* Spotify Connection */}
       <SpotifyConnection
         spotifyAuth={spotifyAuth}
         connecting={spotifyConnecting}
         onConnect={handleSpotifyConnect}
-        hasCredentials={!!(config.spotify?.client_id && config.spotify?.client_secret)}
+        hasCredentials={!!(envCreds?.spotify_client_id && envCreds?.spotify_client_secret)}
       />
 
       {/* Paths */}
@@ -186,78 +184,6 @@ export default function Settings() {
             onChange={(v) => update("external_drive_path", v)}
             placeholder="/Volumes/My Passport/Music/iTunes/iTunes Media/Music/Unknown Artist/Unknown Album"
           />
-        </div>
-      </section>
-
-      {/* Spotify */}
-      <section className={SECTION_CLASS}>
-        <h3 className="text-sm font-semibold text-gray-200">Spotify</h3>
-        <div className="grid grid-cols-2 gap-4">
-          <Field
-            label="Client ID"
-            value={config.spotify?.client_id}
-            onChange={(v) => update("spotify.client_id", v)}
-            placeholder="Your Spotify Client ID"
-          />
-          <Field
-            label="Client Secret"
-            value={config.spotify?.client_secret}
-            onChange={(v) => update("spotify.client_secret", v)}
-            placeholder="Your Spotify Client Secret"
-            type="password"
-          />
-        </div>
-        <Field
-          label="Redirect URI"
-          value={config.spotify?.redirect_uri}
-          onChange={(v) => update("spotify.redirect_uri", v)}
-          placeholder="http://127.0.0.1:8888/callback"
-        />
-      </section>
-
-      {/* Supabase */}
-      <section className={SECTION_CLASS}>
-        <h3 className="text-sm font-semibold text-gray-200">Supabase</h3>
-        <Field
-          label="Project URL"
-          value={config.supabase?.url}
-          onChange={(v) => update("supabase.url", v)}
-          placeholder="https://your-project.supabase.co"
-        />
-        <Field
-          label="Anon Key"
-          value={config.supabase?.anon_key}
-          onChange={(v) => update("supabase.anon_key", v)}
-          placeholder="Your Supabase anon key"
-          type="password"
-        />
-      </section>
-
-      {/* Playlist Mapping */}
-      <section className={SECTION_CLASS}>
-        <h3 className="text-sm font-semibold text-gray-200">
-          Genre → iTunes Playlist Mapping
-        </h3>
-        <p className="text-xs text-gray-500">
-          Apple Music playlist name for each genre. Must match exactly
-          (case-sensitive).
-        </p>
-        <div className="space-y-2">
-          {GENRES.map((genre) => (
-            <div key={genre} className="flex items-center gap-3">
-              <span className="text-xs text-gray-300 w-32 flex-shrink-0">
-                {genre}
-              </span>
-              <input
-                className={INPUT_CLASS}
-                value={config.playlist_mapping?.[genre] || ""}
-                onChange={(e) =>
-                  updateMapping("playlist_mapping", genre, e.target.value)
-                }
-                placeholder="iTunes playlist name"
-              />
-            </div>
-          ))}
         </div>
       </section>
 
@@ -289,6 +215,12 @@ export default function Settings() {
           </div>
         </div>
       </section>
+
+      {/* Auto-Scan Playlists */}
+      <AutoScanPlaylists
+        names={config.auto_scan_playlists || []}
+        onChange={(names) => update("auto_scan_playlists", names)}
+      />
 
       {/* Save */}
       <div className="flex items-center gap-3 pt-2">
@@ -466,6 +398,131 @@ function SpotifyConnection({ spotifyAuth, connecting, onConnect, hasCredentials 
     </section>
   );
 }
+
+function AutoScanPlaylists({ names, onChange }) {
+  const [input, setInput] = useState("");
+
+  const addName = () => {
+    const trimmed = input.trim();
+    if (!trimmed) return;
+    const alreadyExists = names.some(
+      (n) => n.toLowerCase() === trimmed.toLowerCase()
+    );
+    if (alreadyExists) return;
+    onChange([...names, trimmed]);
+    setInput("");
+  };
+
+  const removeName = (index) => {
+    onChange(names.filter((_, i) => i !== index));
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      addName();
+    }
+  };
+
+  return (
+    <section className={SECTION_CLASS}>
+      <div>
+        <h3 className="text-sm font-semibold text-gray-200">Auto-Scan Playlists</h3>
+        <p className="text-xs text-gray-500 mt-1">
+          These Spotify playlists are scanned automatically when the app loads.
+        </p>
+      </div>
+
+      {names.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {names.map((name, i) => (
+            <span
+              key={i}
+              className="flex items-center gap-1.5 bg-base-700 border border-base-600
+                         text-gray-300 text-xs px-2.5 py-1.5 rounded-md"
+            >
+              {name}
+              <button
+                onClick={() => removeName(i)}
+                className="text-gray-500 hover:text-red-400 transition-colors leading-none"
+              >
+                &times;
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      <div className="flex gap-2">
+        <input
+          type="text"
+          className={INPUT_CLASS}
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="Playlist name (e.g. hauz)"
+        />
+        <button
+          onClick={addName}
+          disabled={!input.trim()}
+          className="px-4 py-2 rounded bg-accent/20 text-accent text-sm font-medium
+                     border border-accent/30 hover:bg-accent/30
+                     disabled:opacity-40 disabled:cursor-not-allowed transition-colors
+                     whitespace-nowrap"
+        >
+          Add
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function EnvCredentials({ envCreds }) {
+  if (!envCreds) return null;
+
+  const items = [
+    { label: "Supabase URL", ok: envCreds.supabase_url, env: "SUPABASE_URL" },
+    { label: "Supabase Key", ok: envCreds.supabase_anon_key, env: "SUPABASE_ANON_KEY" },
+    { label: "Spotify Client ID", ok: envCreds.spotify_client_id, env: "SPOTIFY_CLIENT_ID" },
+    { label: "Spotify Secret", ok: envCreds.spotify_client_secret, env: "SPOTIFY_CLIENT_SECRET" },
+  ];
+
+  const allSet = items.every((i) => i.ok);
+
+  return (
+    <section className={SECTION_CLASS}>
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-gray-200">API Credentials</h3>
+        <span className="text-xs text-gray-500">
+          Configured via <code className="bg-base-700 px-1.5 py-0.5 rounded text-gray-400">.env</code>
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {items.map((item) => (
+          <div key={item.env} className="bg-base-900 rounded-lg px-3 py-2.5 border border-base-600">
+            <div className="flex items-center gap-1.5 mb-1">
+              <span
+                className={`inline-block w-2 h-2 rounded-full ${
+                  item.ok ? "bg-green-400" : "bg-red-400"
+                }`}
+              />
+              <span className="text-xs font-medium text-gray-300">{item.label}</span>
+            </div>
+            <span className="text-xs text-gray-500 font-mono">{item.env}</span>
+          </div>
+        ))}
+      </div>
+
+      {!allSet && (
+        <p className="text-xs text-yellow-400/80">
+          Missing credentials — add them to <code className="bg-base-700 px-1 rounded">.env</code> in the project root and restart the backend.
+        </p>
+      )}
+    </section>
+  );
+}
+
 
 function StatusCard({ label, ok, detail }) {
   return (
