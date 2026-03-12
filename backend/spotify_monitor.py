@@ -18,7 +18,7 @@ from typing import Any
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
-from config import get_config
+from config import get_config, get_spotify_creds
 from database import (
     get_existing_spotify_ids,
     get_playlist_snapshot,
@@ -37,15 +37,15 @@ _spotify_client: spotipy.Spotify | None = None
 
 
 def _build_oauth() -> SpotifyOAuth:
-    """Create a SpotifyOAuth manager from the current config."""
-    cfg = get_config()["spotify"]
-    if not cfg.get("client_id") or not cfg.get("client_secret"):
-        raise RuntimeError("Spotify client_id and client_secret must be set in config.json")
+    """Create a SpotifyOAuth manager from environment variables."""
+    creds = get_spotify_creds()
+    if not creds["client_id"] or not creds["client_secret"]:
+        raise RuntimeError("SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET must be set in .env")
 
     return SpotifyOAuth(
-        client_id=cfg["client_id"],
-        client_secret=cfg["client_secret"],
-        redirect_uri=cfg.get("redirect_uri", "http://127.0.0.1:8888/callback"),
+        client_id=creds["client_id"],
+        client_secret=creds["client_secret"],
+        redirect_uri=creds["redirect_uri"],
         scope=(
             "playlist-read-private playlist-read-collaborative "
             "streaming user-read-email user-read-private "
@@ -230,13 +230,6 @@ async def scan_playlist(playlist_id: str, playlist_name: str) -> dict[str, Any]:
 
     snapshot = await asyncio.to_thread(get_playlist_snapshot, playlist_id)
     is_baseline = snapshot is None
-
-    # #region agent log
-    import json as _json, time as _time
-    _log_path = Path(__file__).parent.parent / ".cursor" / "debug-5d0c12.log"
-    with open(_log_path, "a") as _f:
-        _f.write(_json.dumps({"sessionId":"5d0c12","location":"spotify_monitor.py:scan_playlist","message":"Playlist scan starting","data":{"playlist_name":playlist_name,"is_baseline":is_baseline,"track_count":len(playlist_tracks),"snapshot_exists":snapshot is not None},"timestamp":int(_time.time()*1000),"hypothesisId":"H3"}) + "\n")
-    # #endregion
 
     genre = _detect_genre_for_playlist(playlist_name)
     stats: dict[str, Any] = {

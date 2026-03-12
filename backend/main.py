@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from config import load_config, get_config, save_config
+from config import load_config, get_config, save_config, get_supabase_creds, get_spotify_creds
 from database import init_supabase, validate_connection
 from file_pipeline import pipeline
 from itunes_bridge import is_music_app_running
@@ -44,7 +44,10 @@ async def lifespan(app: FastAPI):
         logger.warning("Supabase not configured yet: %s", exc)
 
     # Scan iTunes library in background thread (non-blocking)
-    await asyncio.to_thread(library_cache.scan)
+    try:
+        await asyncio.to_thread(library_cache.scan)
+    except Exception as exc:
+        logger.warning("iTunes library scan failed during startup: %s", exc)
 
     # Start file pipeline (watchdog on ~/Downloads)
     pipeline.start()
@@ -119,7 +122,6 @@ async def get_config_endpoint():
 @app.put("/api/config")
 async def update_config_endpoint(body: dict):
     current = get_config()
-    old_supabase = current.get("supabase", {}).copy()
 
     for key, value in body.items():
         if isinstance(value, dict) and isinstance(current.get(key), dict):
@@ -128,24 +130,21 @@ async def update_config_endpoint(body: dict):
             current[key] = value
     save_config(current)
 
-    new_supabase = current.get("supabase", {})
-    supabase_changed = (
-        new_supabase.get("url") != old_supabase.get("url")
-        or new_supabase.get("anon_key") != old_supabase.get("anon_key")
-    )
-    supabase_ok = False
-    if supabase_changed and new_supabase.get("url") and new_supabase.get("anon_key"):
-        try:
-            init_supabase()
-            supabase_ok = validate_connection()
-            if supabase_ok:
-                logger.info("Supabase reconnected after config update")
-            else:
-                logger.warning("Supabase client created but connection check failed — verify schema")
-        except Exception as exc:
-            logger.error("Failed to reinitialize Supabase: %s", exc)
+    return {"ok": True}
 
-    return {"ok": True, "supabase_reconnected": supabase_ok if supabase_changed else None}
+
+@app.get("/api/credentials/status")
+async def credentials_status():
+    """Report which env-based credentials are configured (without exposing values)."""
+    sb = get_supabase_creds()
+    sp = get_spotify_creds()
+    return {
+        "supabase_url": bool(sb["url"]),
+        "supabase_anon_key": bool(sb["anon_key"]),
+        "spotify_client_id": bool(sp["client_id"]),
+        "spotify_client_secret": bool(sp["client_secret"]),
+        "spotify_redirect_uri": sp["redirect_uri"],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -157,27 +156,10 @@ async def spotify_auth_url():
     """Return the Spotify OAuth URL for the user to authorize the app."""
     from spotify_monitor import get_auth_url
 
-    # #region agent log
-    import json, time
-    _log_path = Path(__file__).parent.parent / ".cursor" / "debug-750055.log"
-    # #endregion
-
     try:
         url = get_auth_url()
-
-        # #region agent log
-        with open(_log_path, "a") as _f:
-            _f.write(json.dumps({"sessionId":"750055","location":"main.py:spotify_auth_url","message":"Auth URL generated","data":{"url_length":len(url)},"timestamp":int(time.time()*1000),"hypothesisId":"H3"}) + "\n")
-        # #endregion
-
         return {"url": url}
     except RuntimeError as exc:
-
-        # #region agent log
-        with open(_log_path, "a") as _f:
-            _f.write(json.dumps({"sessionId":"750055","location":"main.py:spotify_auth_url","message":"Auth URL generation FAILED","data":{"error":str(exc)},"timestamp":int(time.time()*1000),"hypothesisId":"H5"}) + "\n")
-        # #endregion
-
         from fastapi import HTTPException
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -188,30 +170,11 @@ async def spotify_callback(code: str):
     from fastapi.responses import RedirectResponse
     from spotify_monitor import exchange_code
 
-    # #region agent log
-    import json, time
-    _log_path = Path(__file__).parent.parent / ".cursor" / "debug-750055.log"
-    with open(_log_path, "a") as _f:
-        _f.write(json.dumps({"sessionId":"750055","location":"main.py:spotify_callback","message":"Spotify callback received","data":{"code_length":len(code) if code else 0},"timestamp":int(time.time()*1000),"hypothesisId":"H2"}) + "\n")
-    # #endregion
-
     try:
         exchange_code(code)
-
-        # #region agent log
-        with open(_log_path, "a") as _f:
-            _f.write(json.dumps({"sessionId":"750055","location":"main.py:spotify_callback","message":"Spotify token exchange succeeded","data":{},"timestamp":int(time.time()*1000),"hypothesisId":"H2"}) + "\n")
-        # #endregion
-
         return RedirectResponse(url="http://localhost:5173/?spotify=connected", status_code=302)
     except Exception as exc:
         logger.error("Spotify callback failed: %s", exc)
-
-        # #region agent log
-        with open(_log_path, "a") as _f:
-            _f.write(json.dumps({"sessionId":"750055","location":"main.py:spotify_callback","message":"Spotify token exchange FAILED","data":{"error":str(exc)},"timestamp":int(time.time()*1000),"hypothesisId":"H2"}) + "\n")
-        # #endregion
-
         return RedirectResponse(url=f"http://localhost:5173/?spotify=error&detail={exc}", status_code=302)
 
 
@@ -264,42 +227,14 @@ async def scan_playlists(body: dict | None = None):
     from fastapi import HTTPException
     from spotify_monitor import scan_monitored_playlists
 
-    # #region agent log
-    import json as _json, time as _time
-    _log_path = Path(__file__).parent.parent / ".cursor" / "debug-5d0c12.log"
-    # #endregion
-
     playlist_ids = (body or {}).get("playlist_ids")
-
-    # #region agent log
-    with open(_log_path, "a") as _f:
-        _f.write(_json.dumps({"sessionId":"5d0c12","location":"main.py:scan_playlists","message":"Scan endpoint called","data":{"playlist_ids":playlist_ids},"timestamp":int(_time.time()*1000),"hypothesisId":"H2"}) + "\n")
-    # #endregion
 
     try:
         results = await scan_monitored_playlists(playlist_ids)
-        # #region agent log
-        with open(_log_path, "a") as _f:
-            _f.write(_json.dumps({"sessionId":"5d0c12","location":"main.py:scan_playlists","message":"Scan completed successfully","data":{"result_count":len(results),"results":results},"timestamp":int(_time.time()*1000),"hypothesisId":"H5"}) + "\n")
-        # #endregion
     except ValueError as exc:
-        # #region agent log
-        with open(_log_path, "a") as _f:
-            _f.write(_json.dumps({"sessionId":"5d0c12","location":"main.py:scan_playlists","message":"Scan ValueError","data":{"error":str(exc)},"timestamp":int(_time.time()*1000),"hypothesisId":"H5"}) + "\n")
-        # #endregion
         raise HTTPException(status_code=400, detail=str(exc))
     except RuntimeError as exc:
-        # #region agent log
-        with open(_log_path, "a") as _f:
-            _f.write(_json.dumps({"sessionId":"5d0c12","location":"main.py:scan_playlists","message":"Scan RuntimeError","data":{"error":str(exc)},"timestamp":int(_time.time()*1000),"hypothesisId":"H5"}) + "\n")
-        # #endregion
         raise HTTPException(status_code=401, detail=str(exc))
-    except Exception as exc:
-        # #region agent log
-        with open(_log_path, "a") as _f:
-            _f.write(_json.dumps({"sessionId":"5d0c12","location":"main.py:scan_playlists","message":"Scan unexpected exception","data":{"error":str(exc),"type":type(exc).__name__},"timestamp":int(_time.time()*1000),"hypothesisId":"H5"}) + "\n")
-        # #endregion
-        raise
     return {"ok": True, "results": results}
 
 
