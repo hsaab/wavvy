@@ -19,6 +19,7 @@ CONFIG_PATH = Path(__file__).parent.parent / "config.json"
 
 _DEFAULT_CONFIG: dict[str, Any] = {
     "monitored_playlists": [],
+    "auto_scan_playlists": [],
     "downloads_folder": "~/Downloads",
     "external_drive_path": "/Volumes/My Passport/Music/iTunes/iTunes Media/Music/Unknown Artist/Unknown Album",
     "playlist_mapping": {
