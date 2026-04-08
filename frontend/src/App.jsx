@@ -24,6 +24,8 @@ const TOAST_EVENTS = {
     `${p.store} cart ready — ${p.added} added${p.failed ? `, ${p.failed} failed` : ""}`,
   cart_error: (p) => `Cart error (${p.store}): ${p.error}`,
   file_complete: (p) => `"${p.track_name}" processed`,
+  file_downloaded: (p) =>
+    `"${p.track_name || p.filename}" ready to process${p.filename ? ` (${p.filename})` : ""}`,
   file_unmatched: (p) => `Unmatched file: ${p.filename}`,
   file_error: (p) => `File error: ${p.error}`,
 };

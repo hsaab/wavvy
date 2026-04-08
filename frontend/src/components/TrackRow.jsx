@@ -3,9 +3,18 @@ import StatusBadge from "./StatusBadge";
 import ConfidenceBadge from "./ConfidenceBadge";
 import PlaylistPicker from "./PlaylistPicker";
 import PlayButton from "./PlayButton";
-import { updateTrack, addTrackToPlaylists } from "../api";
+import { updateTrack, addTrackToPlaylists, processDownloads } from "../api";
 
-export default function TrackRow({ track, selected, onToggle, onTrackUpdate, allPlaylists, isCarting = false }) {
+export default function TrackRow({
+  track,
+  selected,
+  onToggle,
+  onTrackUpdate,
+  allPlaylists,
+  isCarting = false,
+  onPipelineError,
+  onAfterPipelineAction,
+}) {
   const [busy, setBusy] = useState(false);
   const [syncing, setSyncing] = useState(false);
 
@@ -66,6 +75,14 @@ export default function TrackRow({ track, selected, onToggle, onTrackUpdate, all
         >
           {track.artist_name}
         </div>
+        {track.status === "downloaded" && track.download_path && (
+          <div
+            className="text-[10px] text-indigo-400/90 truncate max-w-[220px] mt-0.5 font-mono"
+            title={track.download_path}
+          >
+            {track.download_path.split("/").pop()}
+          </div>
+        )}
       </td>
 
       {/* Source playlist */}
@@ -200,6 +217,31 @@ export default function TrackRow({ track, selected, onToggle, onTrackUpdate, all
                          hover:bg-amber-500/30 disabled:opacity-40 transition-colors"
             >
               Retry
+            </button>
+          )}
+          {track.status === "downloaded" && (
+            <button
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                try {
+                  const result = await processDownloads([track.id]);
+                  if (result.errors?.length) {
+                    onPipelineError?.(result.errors[0].error);
+                  } else {
+                    onAfterPipelineAction?.();
+                  }
+                } catch (err) {
+                  onPipelineError?.(err.message);
+                } finally {
+                  setBusy(false);
+                }
+              }}
+              className="text-xs px-2 py-0.5 rounded bg-emerald-600/30 text-emerald-300
+                         border border-emerald-500/40 hover:bg-emerald-600/40
+                         disabled:opacity-40 transition-colors font-medium"
+            >
+              Process
             </button>
           )}
         </div>

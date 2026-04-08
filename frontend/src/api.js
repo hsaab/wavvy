@@ -95,6 +95,18 @@ export const addTrackToPlaylists = (trackId) =>
 // File pipeline
 export const getPipelineStatus = () => request("/api/pipeline/status");
 
+export const scanDownloads = () =>
+  request("/api/pipeline/scan", { method: "POST" });
+
+/** Omit trackIds (or pass []) to process every `downloaded` track. */
+export const processDownloads = (trackIds) =>
+  request("/api/pipeline/process", {
+    method: "POST",
+    body: JSON.stringify(
+      trackIds != null && trackIds.length > 0 ? { track_ids: trackIds } : {},
+    ),
+  });
+
 export const assignFile = (filepath, trackId) =>
   request("/api/pipeline/assign", {
     method: "POST",

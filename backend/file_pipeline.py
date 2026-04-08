@@ -1,12 +1,15 @@
-"""File pipeline — watches ~/Downloads for new WAV files and processes them.
+"""File pipeline — watches ~/Downloads for new WAV files and matches them.
 
 Runs a Watchdog observer in a daemon thread. When a .wav lands in the
 downloads folder, the pipeline:
   1. Waits for a stable file size (download complete).
-  2. Fuzzy-matches the filename to ``carted`` tracks in Supabase.
-  3. If matched: moves the file to the external drive genre folder, imports into
-     Apple Music + the correct playlist, updates Supabase status to ``done``.
+  2. Fuzzy-matches the filename to ``carted`` / ``purchased`` tracks in Supabase.
+  3. If matched: sets status ``downloaded`` with ``download_path`` and broadcasts
+     ``file_downloaded`` so the user can adjust playlists before importing.
   4. If unmatched: broadcasts a WebSocket event for manual assignment.
+
+Manual ``process_track`` / API ``POST /api/pipeline/process`` then moves the file
+to the external drive, imports to Apple Music, and marks ``done``.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import re
 import shutil
 import threading
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +30,7 @@ from watchdog.observers import Observer
 
 from config import get_config
 from database import get_tracks_by_status, update_track_status
-from itunes_bridge import add_to_playlist, add_to_multiple_playlists, is_music_app_running
+from itunes_bridge import add_to_multiple_playlists, is_music_app_running
 from itunes_scanner import library_cache
 from notifications import notify_file_processed, notify_file_unmatched, notify_drive_unmounted
 from ws_manager import manager
@@ -39,15 +43,39 @@ DEBOUNCE_COOLDOWN = 10.0  # seconds to ignore duplicate events for the same file
 TEMP_EXTENSIONS = {".crdownload", ".part", ".tmp", ".download", ".partial"}
 
 
+def _strip_diacritics(text: str) -> str:
+    """Remove accent marks / diacritics (e.g. ï → i, é → e)."""
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
+# Suffixes that stores append after " - " and add no matching value
+_MIX_SUFFIX_RE = re.compile(
+    r"\s*-\s*(Original Mix|Extended Mix|Radio Edit|Edit|Remix)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_text(text: str) -> str:
+    """Shared normalization for both filenames and DB strings."""
+    text = _strip_diacritics(text)
+    # Beatport replaces apostrophes with underscores in filenames
+    text = text.replace("_", " ")
+    # Strip all apostrophe variants so Ain't == Aint == Ain t
+    text = text.replace("'", "").replace("\u2019", "").replace("`", "")
+    # Remove parenthetical mix labels: "(Original Mix)", "(Extended Mix)", etc.
+    text = re.sub(r"\s*\(.*?\)\s*", " ", text)
+    # Remove bracket tags: "[WAV]", "[320]", etc.
+    text = re.sub(r"\s*\[.*?\]\s*", " ", text)
+    # Strip trailing store suffixes like "- Edit", "- Extended Mix"
+    text = _MIX_SUFFIX_RE.sub("", text)
+    # Collapse whitespace and lowercase
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
 def _normalize_filename(name: str) -> str:
     """Strip common Beatport/Traxsource filename noise for matching."""
-    name = Path(name).stem
-    # Remove parenthetical mix labels: "(Original Mix)", "(Extended Mix)", etc.
-    name = re.sub(r"\s*\(.*?\)\s*", " ", name)
-    # Remove bracket tags: "[WAV]", "[320]", etc.
-    name = re.sub(r"\s*\[.*?\]\s*", " ", name)
-    # Collapse whitespace and lowercase
-    return re.sub(r"\s+", " ", name).strip().lower()
+    return _normalize_text(Path(name).stem)
 
 
 def _split_artist_title(filename: str) -> tuple[str, str]:
@@ -68,22 +96,30 @@ def _score_against_track(filename: str, track: dict[str, Any]) -> int:
     norm = _normalize_filename(filename)
     artist_part, title_part = _split_artist_title(filename)
 
-    db_artist = (track.get("artist_name") or "").lower()
-    db_title = (track.get("track_name") or "").lower()
+    db_artist = _normalize_text(track.get("artist_name") or "")
+    db_title = _normalize_text(track.get("track_name") or "")
     db_combined = f"{db_artist} {db_title}".strip()
 
     scores: list[int] = []
 
-    # Full normalized filename vs DB combined
+    # Full normalized filename vs DB combined (both sort and set variants)
     scores.append(fuzz.token_sort_ratio(norm, db_combined))
+    scores.append(fuzz.token_set_ratio(norm, db_combined))
 
     # If we extracted artist/title, compare parts individually
     if artist_part:
-        artist_score = fuzz.token_sort_ratio(artist_part.lower(), db_artist)
-        title_norm = _normalize_filename(title_part)
-        title_score = fuzz.token_sort_ratio(title_norm, db_title)
-        # Weighted: title matters more than artist for matching
-        scores.append(int(artist_score * 0.35 + title_score * 0.65))
+        artist_norm = _normalize_text(artist_part)
+        title_norm = _normalize_text(title_part)
+
+        # token_sort: penalizes extra/missing tokens
+        artist_sort = fuzz.token_sort_ratio(artist_norm, db_artist)
+        title_sort = fuzz.token_sort_ratio(title_norm, db_title)
+        scores.append(int(artist_sort * 0.35 + title_sort * 0.65))
+
+        # token_set: forgiving when one side has extra tokens (e.g. "- Edit")
+        artist_set = fuzz.token_set_ratio(artist_norm, db_artist)
+        title_set = fuzz.token_set_ratio(title_norm, db_title)
+        scores.append(int(artist_set * 0.35 + title_set * 0.65))
 
     return max(scores)
 
@@ -190,9 +226,43 @@ class FilePipeline:
             "queue_size": len(self._queue),
         }
 
+    def scan_downloads(self) -> list[str]:
+        """Scan the downloads folder for WAV files and enqueue any that pass filters.
+
+        Useful for picking up files that landed before the pipeline started or
+        that were missed due to a prior matching bug.
+        Returns the list of filenames enqueued.
+        """
+        cfg = get_config()
+        downloads = Path(cfg.get("downloads_folder", "~/Downloads")).expanduser()
+        if not downloads.is_dir():
+            logger.warning("Downloads folder missing for scan: %s", downloads)
+            return []
+
+        enqueued: list[str] = []
+        for wav in sorted(downloads.glob("*.wav")):
+            if wav.name.startswith("."):
+                continue
+            self._force_enqueue(wav)
+            enqueued.append(wav.name)
+
+        logger.info("Download scan complete — enqueued %d file(s)", len(enqueued))
+        return enqueued
+
     # ------------------------------------------------------------------
     # Queueing / debounce
     # ------------------------------------------------------------------
+
+    def _force_enqueue(self, path: Path) -> None:
+        """Enqueue a file bypassing debounce (used by scan_downloads)."""
+        if not self._should_process(path):
+            return
+        with self._seen_lock:
+            self._seen[path.name] = time.time()
+        self.last_event_time = time.time()
+        with self._queue_lock:
+            self._queue.append(path)
+        logger.info("Queued for processing (scan): %s", path.name)
 
     def enqueue(self, path: Path) -> None:
         """Add a file to the processing queue if it passes filters."""
@@ -283,40 +353,24 @@ class FilePipeline:
             "score": score,
         })
 
-        # Transition: carted → processing
-        update_track_status(track["id"], "processing")
-        self._broadcast("file_processing", {
+        # Pause for manual review (playlists, etc.) before move + import
+        update_track_status(
+            track["id"],
+            "downloaded",
+            {"download_path": str(path.resolve())},
+        )
+        self._broadcast("file_downloaded", {
             "track_id": track["id"],
             "filename": path.name,
+            "filepath": str(path.resolve()),
+            "track_name": track["track_name"],
+            "artist_name": track["artist_name"],
+            "score": score,
         })
-
-        try:
-            dest = self._move_to_drive(path, track)
-            self._import_to_itunes(dest, track)
-
-            update_track_status(track["id"], "done", {"file_path": str(dest)})
-            self.files_processed += 1
-
-            self._broadcast("file_complete", {
-                "track_id": track["id"],
-                "track_name": track["track_name"],
-                "artist_name": track["artist_name"],
-                "destination": str(dest),
-            })
-            notify_file_processed(
-                track.get("track_name", path.name),
-                track.get("genre", "Unknown"),
-            )
-            logger.info("Pipeline complete for %s → %s", path.name, dest)
-
-        except Exception as exc:
-            logger.error("Pipeline failed for %s: %s", path.name, exc)
-            update_track_status(track["id"], "carted")
-            self._broadcast("file_error", {
-                "track_id": track["id"],
-                "filename": path.name,
-                "error": str(exc),
-            })
+        logger.info(
+            "Matched %s — status=downloaded (awaiting Process in UI)",
+            path.name,
+        )
 
     # ------------------------------------------------------------------
     # Stability check
@@ -347,17 +401,17 @@ class FilePipeline:
 
     @staticmethod
     def _match_to_track(filename: str) -> tuple[dict[str, Any] | None, int]:
-        """Fuzzy-match *filename* against carted tracks in Supabase.
+        """Fuzzy-match *filename* against carted/purchased tracks in Supabase.
 
         Returns (best_matching_track, score) or (None, 0).
         """
-        carted = get_tracks_by_status("carted")
-        if not carted:
+        candidates = get_tracks_by_status("carted") + get_tracks_by_status("purchased")
+        if not candidates:
             return None, 0
 
         best_track: dict[str, Any] | None = None
         best_score = 0
-        for track in carted:
+        for track in candidates:
             score = _score_against_track(filename, track)
             if score > best_score:
                 best_score = score
@@ -433,6 +487,92 @@ class FilePipeline:
         )
 
     # ------------------------------------------------------------------
+    # Manual import (after user clicks Process)
+    # ------------------------------------------------------------------
+
+    def process_track(self, track_id: int) -> dict[str, Any]:
+        """Move ``download_path`` to the drive, import to iTunes, mark ``done``."""
+        from database import get_supabase
+
+        result = get_supabase().table("tracks").select("*").eq("id", track_id).execute()
+        if not result.data:
+            raise ValueError(f"Track {track_id} not found")
+        track = result.data[0]
+
+        if track.get("status") != "downloaded":
+            raise ValueError(
+                f"Track {track_id} is not awaiting processing (status={track.get('status')!r})",
+            )
+
+        raw_path = track.get("download_path") or ""
+        if not raw_path:
+            raise ValueError(f"Track {track_id} has no download_path")
+
+        path = Path(raw_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Download file missing: {raw_path}")
+
+        update_track_status(track_id, "processing")
+        self._broadcast("file_processing", {
+            "track_id": track_id,
+            "filename": path.name,
+        })
+
+        refreshed = get_supabase().table("tracks").select("*").eq("id", track_id).execute()
+        if not refreshed.data:
+            raise ValueError(f"Track {track_id} not found after status update")
+        track = refreshed.data[0]
+
+        try:
+            dest = self._move_to_drive(path, track)
+            self._import_to_itunes(dest, track)
+            update_track_status(
+                track_id,
+                "done",
+                {"file_path": str(dest), "download_path": None},
+            )
+            self.files_processed += 1
+            self._broadcast("file_complete", {
+                "track_id": track_id,
+                "track_name": track["track_name"],
+                "artist_name": track["artist_name"],
+                "destination": str(dest),
+            })
+            notify_file_processed(
+                track.get("track_name", path.name),
+                track.get("genre", "Unknown"),
+            )
+            logger.info("Manual process complete for track %s → %s", track_id, dest)
+            return {"ok": True, "destination": str(dest)}
+
+        except Exception as exc:
+            logger.error("process_track failed for %s: %s", track_id, exc)
+            restore = raw_path
+            if path.exists():
+                restore = str(path.resolve())
+            update_track_status(track_id, "downloaded", {"download_path": restore})
+            self._broadcast("file_error", {
+                "track_id": track_id,
+                "filename": path.name,
+                "error": str(exc),
+            })
+            raise
+
+    def process_all_downloaded(self) -> dict[str, Any]:
+        """Process every track in ``downloaded`` status. Returns per-track outcomes."""
+        downloaded = get_tracks_by_status("downloaded")
+        processed: list[int] = []
+        errors: list[dict[str, Any]] = []
+        for row in downloaded:
+            tid = row["id"]
+            try:
+                self.process_track(tid)
+                processed.append(tid)
+            except Exception as exc:
+                errors.append({"track_id": tid, "error": str(exc)})
+        return {"processed": processed, "errors": errors, "count": len(processed)}
+
+    # ------------------------------------------------------------------
     # Manual assignment (for unmatched files)
     # ------------------------------------------------------------------
 
@@ -444,41 +584,26 @@ class FilePipeline:
         if path.suffix.lower() != ".wav":
             raise ValueError("Only WAV files are supported")
 
-        # Fetch the track
         from database import get_supabase
         result = get_supabase().table("tracks").select("*").eq("id", track_id).execute()
         if not result.data:
             raise ValueError(f"Track {track_id} not found")
         track = result.data[0]
 
-        update_track_status(track_id, "processing")
-        self._broadcast("file_processing", {
+        update_track_status(
+            track_id,
+            "downloaded",
+            {"download_path": str(path.resolve())},
+        )
+        self._broadcast("file_downloaded", {
             "track_id": track_id,
             "filename": path.name,
+            "filepath": str(path.resolve()),
+            "track_name": track["track_name"],
+            "artist_name": track["artist_name"],
         })
-
-        try:
-            dest = self._move_to_drive(path, track)
-            self._import_to_itunes(dest, track)
-            update_track_status(track_id, "done", {"file_path": str(dest)})
-            self.files_processed += 1
-
-            self._broadcast("file_complete", {
-                "track_id": track_id,
-                "track_name": track["track_name"],
-                "artist_name": track["artist_name"],
-                "destination": str(dest),
-            })
-            return {"ok": True, "destination": str(dest)}
-
-        except Exception as exc:
-            update_track_status(track_id, "carted")
-            self._broadcast("file_error", {
-                "track_id": track_id,
-                "filename": path.name,
-                "error": str(exc),
-            })
-            raise
+        logger.info("Assigned %s → track %s (status=downloaded)", path.name, track_id)
+        return {"ok": True, "awaiting_process": True, "filepath": str(path.resolve())}
 
     # ------------------------------------------------------------------
     # WebSocket helper (bridges sync thread → async broadcast)

@@ -39,6 +39,9 @@ _spotify_client: spotipy.Spotify | None = None
 def _build_oauth() -> SpotifyOAuth:
     """Create a SpotifyOAuth manager from environment variables."""
     creds = get_spotify_creds()
+    # #region agent log
+    import json as _json; _lp = "/Users/hassansaab/apps/wavvy/.cursor/debug-265acb.log"; open(_lp, "a").write(_json.dumps({"sessionId": "265acb", "hypothesisId": "H1,H4", "location": "spotify_monitor.py:_build_oauth", "message": "Spotify creds loaded", "data": {"client_id_len": len(creds["client_id"]), "client_secret_len": len(creds["client_secret"]), "id_equals_secret": creds["client_id"] == creds["client_secret"], "redirect_uri": creds["redirect_uri"], "id_first4": creds["client_id"][:4] if creds["client_id"] else "EMPTY", "secret_first4": creds["client_secret"][:4] if creds["client_secret"] else "EMPTY"}, "timestamp": __import__("time").time()}) + "\n")
+    # #endregion
     if not creds["client_id"] or not creds["client_secret"]:
         raise RuntimeError("SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET must be set in .env")
 
@@ -82,6 +85,9 @@ def get_access_token() -> str:
     """
     auth_manager = _build_oauth()
     token_info = auth_manager.cache_handler.get_cached_token()
+    # #region agent log
+    import json as _json, time as _time; _lp = "/Users/hassansaab/apps/wavvy/.cursor/debug-265acb.log"; open(_lp, "a").write(_json.dumps({"sessionId": "265acb", "hypothesisId": "H2,H3,H5", "location": "spotify_monitor.py:get_access_token", "message": "Cached token state", "data": {"has_token": token_info is not None, "scopes": token_info.get("scope", "") if token_info else "NONE", "is_expired": auth_manager.is_token_expired(token_info) if token_info else "NO_TOKEN", "has_refresh": bool(token_info.get("refresh_token")) if token_info else False, "expires_at": token_info.get("expires_at") if token_info else None}, "timestamp": _time.time()}) + "\n")
+    # #endregion
     if not token_info:
         raise RuntimeError(
             "No cached Spotify token. Complete OAuth flow first via /api/spotify/auth-url"
@@ -89,6 +95,9 @@ def get_access_token() -> str:
 
     cached_scopes = set(token_info.get("scope", "").split())
     missing = REQUIRED_SCOPES - cached_scopes
+    # #region agent log
+    open(_lp, "a").write(_json.dumps({"sessionId": "265acb", "hypothesisId": "H3", "location": "spotify_monitor.py:get_access_token:scopes", "message": "Scope check", "data": {"cached_scopes": sorted(list(cached_scopes)), "required_scopes": sorted(list(REQUIRED_SCOPES)), "missing": sorted(list(missing))}, "timestamp": _time.time()}) + "\n")
+    # #endregion
     if missing:
         logger.warning("Cached token missing scopes: %s — deleting cache to force re-auth", missing)
         CACHE_PATH.unlink(missing_ok=True)
@@ -98,7 +107,19 @@ def get_access_token() -> str:
         )
 
     if auth_manager.is_token_expired(token_info):
-        token_info = auth_manager.refresh_access_token(token_info["refresh_token"])
+        # #region agent log
+        open(_lp, "a").write(_json.dumps({"sessionId": "265acb", "hypothesisId": "H2", "location": "spotify_monitor.py:get_access_token:refresh", "message": "Attempting token refresh", "data": {"has_refresh_token": bool(token_info.get("refresh_token"))}, "timestamp": _time.time()}) + "\n")
+        # #endregion
+        try:
+            token_info = auth_manager.refresh_access_token(token_info["refresh_token"])
+            # #region agent log
+            open(_lp, "a").write(_json.dumps({"sessionId": "265acb", "hypothesisId": "H2", "location": "spotify_monitor.py:get_access_token:refresh_ok", "message": "Token refresh succeeded", "timestamp": _time.time()}) + "\n")
+            # #endregion
+        except Exception as exc:
+            # #region agent log
+            open(_lp, "a").write(_json.dumps({"sessionId": "265acb", "hypothesisId": "H1,H2", "location": "spotify_monitor.py:get_access_token:refresh_fail", "message": "Token refresh FAILED", "data": {"error": str(exc), "error_type": type(exc).__name__}, "timestamp": _time.time()}) + "\n")
+            # #endregion
+            raise
     return token_info["access_token"]
 
 

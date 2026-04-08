@@ -90,7 +90,7 @@ This is a local Mac application for a DJ/producer. It monitors Spotify playlists
 - All database calls in `database.py` as helper functions wrapping supabase client
 - Use supabase-py's query builder
 - Never write raw SQL in application code (schema setup is in Supabase SQL editor)
-- Track status flow: new → approved → carted → purchased → processing → done | skipped | cart_failed | baseline
+- Track status flow: new → approved → carted → purchased → downloaded → processing → done | skipped | cart_failed | baseline
 - Skipped tracks are permanent — they never resurface in the queue unless manually un-skipped
 - Baseline tracks are from the first scan of a playlist — they existed before monitoring started
 - spotify_id is the unique identifier — never duplicate

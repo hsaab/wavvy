@@ -1,5 +1,14 @@
 import { useState, useEffect, useCallback } from "react";
-import { getTracks, getTrackCounts, updateTrack, resolveLinks, buildCart, getLibraryPlaylists } from "../api";
+import {
+  getTracks,
+  getTrackCounts,
+  updateTrack,
+  resolveLinks,
+  buildCart,
+  getLibraryPlaylists,
+  scanDownloads,
+  processDownloads,
+} from "../api";
 import TrackRow from "./TrackRow";
 import CartProgressBanner from "./CartProgressBanner";
 
@@ -8,6 +17,7 @@ const REFRESH_EVENTS = [
   "scan_batch_complete",
   "resolve_complete",
   "file_complete",
+  "file_downloaded",
   "cart_complete",
 ];
 
@@ -29,6 +39,8 @@ export default function TrackQueue({ wsMessage }) {
   const [iTunesPlaylists, setITunesPlaylists] = useState([]);
   const [cartState, setCartState] = useState(null);
   const [cartingTrackId, setCartingTrackId] = useState(null);
+  const [scanningDownloads, setScanningDownloads] = useState(false);
+  const [processingDownloads, setProcessingDownloads] = useState(false);
 
   const fetchData = useCallback(async () => {
     try {
@@ -216,6 +228,41 @@ export default function TrackQueue({ wsMessage }) {
       .forEach((t) => window.open(t[urlField], "_blank", "noopener"));
   };
 
+  const handleScanDownloads = async () => {
+    setScanningDownloads(true);
+    try {
+      await scanDownloads();
+      await fetchData();
+    } catch (err) {
+      setError(`Scan downloads failed: ${err.message}`);
+    } finally {
+      setScanningDownloads(false);
+    }
+  };
+
+  const handleProcessAllDownloaded = async () => {
+    setProcessingDownloads(true);
+    try {
+      const result = await processDownloads();
+      if (result.errors?.length) {
+        setError(
+          `Some imports failed: ${result.errors
+            .map((e) => `#${e.track_id} ${e.error}`)
+            .join("; ")}`,
+        );
+      } else {
+        setError(null);
+      }
+      await fetchData();
+    } catch (err) {
+      setError(`Process downloads failed: ${err.message}`);
+    } finally {
+      setProcessingDownloads(false);
+    }
+  };
+
+  const downloadedCount = tracks.filter((t) => t.status === "downloaded").length;
+
   const isCartRunning = cartState && (cartState.phase === "logging_in" || cartState.phase === "adding");
   const dismissBanner = () => setCartState(null);
 
@@ -311,6 +358,24 @@ export default function TrackQueue({ wsMessage }) {
             label="Cart TS"
             disabled={isCartRunning}
           />
+          <ActionBtn
+            color="accent"
+            onClick={handleScanDownloads}
+            label={scanningDownloads ? "Scanning…" : "Scan Downloads"}
+            disabled={scanningDownloads || isCartRunning}
+          />
+          {downloadedCount > 0 && (
+            <ActionBtn
+              color="emerald"
+              onClick={handleProcessAllDownloaded}
+              label={
+                processingDownloads
+                  ? "Processing…"
+                  : `Process All (${downloadedCount})`
+              }
+              disabled={processingDownloads || isCartRunning}
+            />
+          )}
         </div>
       </div>
 
@@ -363,6 +428,8 @@ export default function TrackQueue({ wsMessage }) {
                   onTrackUpdate={handleTrackUpdate}
                   allPlaylists={iTunesPlaylists}
                   isCarting={track.id === cartingTrackId}
+                  onPipelineError={(msg) => setError(msg)}
+                  onAfterPipelineAction={fetchData}
                 />
               ))}
             </tbody>
@@ -380,6 +447,7 @@ const COLOR_MAP = {
   accent: "bg-accent/20 text-accent hover:bg-accent/30 border-accent/30",
   orange: "bg-orange-500/20 text-orange-400 hover:bg-orange-500/30 border-orange-500/30",
   cyan: "bg-cyan-500/20 text-cyan-400 hover:bg-cyan-500/30 border-cyan-500/30",
+  indigo: "bg-indigo-500/20 text-indigo-300 hover:bg-indigo-500/30 border-indigo-500/30",
 };
 
 function ActionBtn({ color, onClick, label, disabled = false }) {

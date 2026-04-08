@@ -78,12 +78,21 @@ export default function Settings() {
   };
 
   const handleSpotifyConnect = async () => {
+    // #region agent log
+    fetch('http://127.0.0.1:7483/ingest/0af165c8-1606-4788-914e-17a20a3df62f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'265acb'},body:JSON.stringify({sessionId:'265acb',location:'Settings.jsx:handleSpotifyConnect',message:'Connect button clicked',data:{spotifyConnecting,hasError:!!error},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     setSpotifyConnecting(true);
     setError(null);
     try {
       const { url } = await getSpotifyAuthUrl();
+      // #region agent log
+      fetch('http://127.0.0.1:7483/ingest/0af165c8-1606-4788-914e-17a20a3df62f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'265acb'},body:JSON.stringify({sessionId:'265acb',hypothesisId:'H7,H8',location:'Settings.jsx:handleSpotifyConnect:gotUrl',message:'Auth URL received',data:{url,urlLength:url?.length},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       window.location.href = url;
     } catch (err) {
+      // #region agent log
+      fetch('http://127.0.0.1:7483/ingest/0af165c8-1606-4788-914e-17a20a3df62f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'265acb'},body:JSON.stringify({sessionId:'265acb',hypothesisId:'H7',location:'Settings.jsx:handleSpotifyConnect:error',message:'Auth URL fetch failed',data:{error:err.message},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       setError(`Spotify auth failed: ${err.message}`);
       setSpotifyConnecting(false);
     }
@@ -161,6 +170,9 @@ export default function Settings() {
       <EnvCredentials envCreds={envCreds} />
 
       {/* Spotify Connection */}
+      {/* #region agent log */}
+      {(() => { fetch('http://127.0.0.1:7483/ingest/0af165c8-1606-4788-914e-17a20a3df62f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'265acb'},body:JSON.stringify({sessionId:'265acb',hypothesisId:'H6',location:'Settings.jsx:render:SpotifyConnection',message:'SpotifyConnection props',data:{spotifyAuth,spotifyConnecting,hasCredentials:!!(envCreds?.spotify_client_id && envCreds?.spotify_client_secret),envCreds},timestamp:Date.now()})}).catch(()=>{}); return null; })()}
+      {/* #endregion */}
       <SpotifyConnection
         spotifyAuth={spotifyAuth}
         connecting={spotifyConnecting}

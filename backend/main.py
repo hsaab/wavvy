@@ -261,7 +261,14 @@ async def _auto_resolve_new_tracks() -> None:
 # Tracks (basic CRUD — expanded in later phases)
 # ---------------------------------------------------------------------------
 
-ACTIVE_STATUSES = ["new", "approved", "carted", "cart_failed", "processing"]
+ACTIVE_STATUSES = [
+    "new",
+    "approved",
+    "carted",
+    "cart_failed",
+    "processing",
+    "downloaded",
+]
 
 
 @app.get("/api/tracks")
@@ -468,6 +475,46 @@ async def add_track_to_playlists(track_id: int):
 async def pipeline_status():
     """Return current state of the file-watch pipeline."""
     return pipeline.status()
+
+
+@app.post("/api/pipeline/scan")
+async def pipeline_scan():
+    """Scan ~/Downloads for WAV files and enqueue them for processing."""
+    enqueued = await asyncio.to_thread(pipeline.scan_downloads)
+    return {"enqueued": enqueued, "count": len(enqueued)}
+
+
+@app.post("/api/pipeline/process")
+async def pipeline_process(body: dict | None = None):
+    """Move + import downloaded WAVs. Body optional: ``{"track_ids": [1, 2]}`` or omit for all ``downloaded``."""
+    from fastapi import HTTPException
+
+    payload = body if body is not None else {}
+    track_ids = payload.get("track_ids")
+
+    def run_process() -> dict:
+        if track_ids is not None:
+            if not isinstance(track_ids, list):
+                raise ValueError("track_ids must be a list of integers")
+            processed: list[int] = []
+            errors: list[dict] = []
+            for raw in track_ids:
+                try:
+                    tid = int(raw)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("track_ids must be integers") from exc
+                try:
+                    pipeline.process_track(tid)
+                    processed.append(tid)
+                except Exception as exc:
+                    errors.append({"track_id": tid, "error": str(exc)})
+            return {"processed": processed, "errors": errors, "count": len(processed)}
+        return pipeline.process_all_downloaded()
+
+    try:
+        return await asyncio.to_thread(run_process)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/pipeline/assign")

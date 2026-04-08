@@ -14,11 +14,11 @@ create table if not exists tracks (
   spotify_url     text not null default '',
   source_playlist text not null default '',
 
-  -- Pipeline state: new → approved → carted → processing → done
+  -- Pipeline state: new → approved → carted → downloaded → processing → done
   -- Also: skipped, cart_failed, baseline
   status          text not null default 'new'
     check (status in (
-      'new', 'approved', 'carted', 'purchased', 'processing',
+      'new', 'approved', 'carted', 'purchased', 'downloaded', 'processing',
       'done', 'skipped', 'cart_failed', 'baseline'
     )),
 
@@ -36,6 +36,7 @@ create table if not exists tracks (
 
   -- File pipeline metadata (populated in Phase 6)
   file_path       text,
+  download_path   text,
 
   date_detected   timestamptz not null default now(),
   updated_at      timestamptz not null default now()
