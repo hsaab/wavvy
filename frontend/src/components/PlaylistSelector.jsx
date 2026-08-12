@@ -41,16 +41,18 @@ export default function PlaylistSelector({ wsMessage, onClose }) {
       setScanProgress(wsMessage.payload);
     }
     if (wsMessage.type === "scan_batch_complete") {
-      setScanning(false);
-      setScanProgress(null);
+      // Leftover lastMessage can still be this complete object. App passes an
+      // inline onClose, so parent re-renders re-run this effect. Only clear
+      // scanning UI when this modal's own scan finished.
       if (
         shouldAutoCloseScanModal(wsMessage, {
           startedByThisModal: startedByThisModalRef.current,
           messageAtOpen: messageAtOpenRef.current,
-        }) &&
-        onClose
+        })
       ) {
-        setTimeout(onClose, 800);
+        setScanning(false);
+        setScanProgress(null);
+        if (onClose) setTimeout(onClose, 800);
       }
     }
   }, [wsMessage, onClose]);
