@@ -14,8 +14,8 @@ BEATPORT_BASE_URL = "https://www.beatport.com"
 BEATPORT_AUTH_URL = "https://account.beatport.com"
 BEATPORT_CART_URL = "https://www.beatport.com/cart"
 
-# Homepage login button (person icon / "Log In" link share this class)
-BP_LOGIN_TRIGGER = '.Button-style__ButtonStyled-sc-f1d733ca-0.link'
+# Homepage login control — visible "Log In" text on an a or button
+BP_LOGIN_TRIGGER = 'a:has-text("Log In"), button:has-text("Log In")'
 
 # Auth page (account.beatport.com) — username/password form
 BP_EMAIL_INPUT = "#username"

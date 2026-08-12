@@ -67,6 +67,15 @@ Store = Literal["beatport", "traxsource"]
 
 _running: dict[str, bool] = {"beatport": False, "traxsource": False}
 
+# FastAPI loop, captured on the app thread before Playwright runs in to_thread.
+_loop: asyncio.AbstractEventLoop | None = None
+
+_DESKTOP_CHROME_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
 
 def is_running(store: Store) -> bool:
     """Check whether a cart-build session is already active for *store*."""
@@ -79,16 +88,12 @@ def is_running(store: Store) -> bool:
 
 def _broadcast(event_type: str, payload: Any) -> None:
     """Fire-and-forget a WebSocket broadcast from the sync Playwright thread."""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.ensure_future(manager.broadcast(event_type, payload))
-        else:
-            loop.run_until_complete(manager.broadcast(event_type, payload))
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        loop.run_until_complete(manager.broadcast(event_type, payload))
-        loop.close()
+    if _loop is not None and _loop.is_running():
+        asyncio.run_coroutine_threadsafe(
+            manager.broadcast(event_type, payload), _loop,
+        )
+    else:
+        logger.warning("No running event loop for cart broadcast: %s", event_type)
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +389,7 @@ def _launch_browser(pw: Playwright, store: Store) -> tuple[BrowserContext, Page]
     context = browser.new_context(
         storage_state=storage,
         viewport={"width": 1280, "height": 900},
+        user_agent=_DESKTOP_CHROME_UA,
     )
     context.set_default_timeout(NAV_TIMEOUT_MS)
     page = context.new_page()
