@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   getTracks,
   getTrackCounts,
@@ -11,6 +11,12 @@ import {
 } from "../api";
 import TrackRow from "./TrackRow";
 import CartProgressBanner from "./CartProgressBanner";
+import {
+  resolveLinksLabel,
+  resolveLinksDisabled,
+  cartButtonLabel,
+  cartButtonDisabled,
+} from "./actionButtonFeedback";
 
 const REFRESH_EVENTS = [
   "scan_complete",
@@ -41,6 +47,11 @@ export default function TrackQueue({ wsMessage }) {
   const [cartingTrackId, setCartingTrackId] = useState(null);
   const [scanningDownloads, setScanningDownloads] = useState(false);
   const [processingDownloads, setProcessingDownloads] = useState(false);
+  const [resolvingLinks, setResolvingLinks] = useState(false);
+  const [cartStarting, setCartStarting] = useState(null);
+  const [resolveProgress, setResolveProgress] = useState(null);
+  const resolvingLinksRef = useRef(false);
+  resolvingLinksRef.current = resolvingLinks;
 
   const fetchData = useCallback(async () => {
     try {
@@ -77,6 +88,11 @@ export default function TrackQueue({ wsMessage }) {
       fetchData();
     }
 
+    if (wsMessage.type === "resolve_progress" && resolvingLinksRef.current) {
+      const p = wsMessage.payload || {};
+      setResolveProgress({ current: p.current, total: p.total });
+    }
+
     if (!CART_EVENTS.includes(wsMessage.type)) return;
 
     const p = wsMessage.payload || {};
@@ -85,6 +101,7 @@ export default function TrackQueue({ wsMessage }) {
       case "cart_started":
         setCartState({ store: p.store, phase: "logging_in", current: 0, total: 0, track: null });
         setCartingTrackId(null);
+        setCartStarting(null);
         break;
 
       case "cart_progress":
@@ -133,6 +150,7 @@ export default function TrackQueue({ wsMessage }) {
           error: p.error,
         }));
         setCartingTrackId(null);
+        setCartStarting(null);
         break;
 
       default:
@@ -205,18 +223,24 @@ export default function TrackQueue({ wsMessage }) {
   };
 
   const handleResolveLinks = async () => {
+    setResolvingLinks(true);
     try {
       const ids = selected.size > 0 ? [...selected] : undefined;
       await resolveLinks(ids);
     } catch (err) {
       setError(`Resolve failed: ${err.message}`);
+    } finally {
+      setResolvingLinks(false);
+      setResolveProgress(null);
     }
   };
 
   const handleBuildCart = async (store) => {
+    setCartStarting(store);
     try {
       await buildCart(store);
     } catch (err) {
+      setCartStarting(null);
       setError(`Cart build failed: ${err.message}`);
     }
   };
@@ -334,7 +358,12 @@ export default function TrackQueue({ wsMessage }) {
           <ActionBtn
             color="accent"
             onClick={handleResolveLinks}
-            label={`Resolve Links${selected.size ? ` (${selected.size})` : ""}`}
+            label={resolveLinksLabel({
+              resolvingLinks,
+              selectedCount: selected.size,
+              resolveProgress,
+            })}
+            disabled={resolveLinksDisabled({ resolvingLinks })}
           />
           <ActionBtn
             color="orange"
@@ -349,14 +378,22 @@ export default function TrackQueue({ wsMessage }) {
           <ActionBtn
             color="orange"
             onClick={() => handleBuildCart("beatport")}
-            label="Cart BP"
-            disabled={isCartRunning}
+            label={cartButtonLabel({
+              store: "beatport",
+              cartStarting,
+              isCartRunning,
+            })}
+            disabled={cartButtonDisabled({ cartStarting, isCartRunning })}
           />
           <ActionBtn
             color="cyan"
             onClick={() => handleBuildCart("traxsource")}
-            label="Cart TS"
-            disabled={isCartRunning}
+            label={cartButtonLabel({
+              store: "traxsource",
+              cartStarting,
+              isCartRunning,
+            })}
+            disabled={cartButtonDisabled({ cartStarting, isCartRunning })}
           />
           <ActionBtn
             color="accent"
