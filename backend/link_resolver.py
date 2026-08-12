@@ -24,7 +24,7 @@ from bs4 import BeautifulSoup
 
 from beatport_browser import BeatportBrowser, BeatportBrowserError
 from database import get_supabase, update_track_fields
-from store_match import StoreQuery, parse_store_hit, parse_store_query, score_hit
+from store_match import StoreHit, StoreQuery, parse_store_hit, parse_store_query, score_hit
 from traxsource_browser import TraxsourceBrowser, TraxsourceBrowserError
 from ws_manager import manager
 
@@ -87,9 +87,41 @@ def _store_query(title: str, artist: str) -> StoreQuery:
 
 
 def _score_store_row(query: StoreQuery, title: str, artist: str, url: str) -> int:
-    """Score a candidate through store_match (title parse only in this slice)."""
+    """Score a candidate through store_match using title/artist/url parse."""
     hit = parse_store_hit(title=title, artist=artist, url=url)
     return score_hit(query, hit)
+
+
+def _beatport_person_names(people: object) -> list[str]:
+    """Pull artist_name/name strings from a Beatport artists or remixers list."""
+    if not isinstance(people, list):
+        return []
+    names: list[str] = []
+    for person in people:
+        if not isinstance(person, dict):
+            continue
+        name = person.get("artist_name", "") or person.get("name", "")
+        if name:
+            names.append(name)
+    return names
+
+
+def _store_hit_from_beatport_json(track: dict, url: str) -> StoreHit:
+    """Map Beatport JSON mix_name and remixers[] onto a StoreHit.
+
+    A title that only says Remix still needs remixers[] so the named-remix
+    gate can confirm the remixer. mix_name is folded into the title so
+    parse_store_hit classifies Original Mix vs Remix.
+    """
+    raw_name = track.get("track_name", "") or track.get("name", "")
+    mix_name = (track.get("mix_name") or "").strip()
+    artist_str = ", ".join(_beatport_person_names(track.get("artists")))
+    remixers = _beatport_person_names(track.get("remixers"))
+    title = f"{raw_name} ({mix_name})" if mix_name else raw_name
+    hit = parse_store_hit(title=title, artist=artist_str, url=url)
+    if remixers:
+        hit.remixers = remixers
+    return hit
 
 
 # ---------------------------------------------------------------------------
@@ -252,16 +284,13 @@ def _best_beatport_track_match(
 
     for t in tracks[:15]:
         raw_name = t.get("track_name", "") or t.get("name", "")
-        artist_str = ", ".join(
-            a.get("artist_name", "") or a.get("name", "")
-            for a in t.get("artists", [])
-        )
         track_id = t.get("track_id") or t.get("id")
         slug = t.get("slug") or _slug_from_name(raw_name)
         if not track_id or not slug:
             continue
         url = f"https://www.beatport.com/track/{slug}/{track_id}"
-        score = _score_store_row(query, raw_name, artist_str, url)
+        hit = _store_hit_from_beatport_json(t, url)
+        score = score_hit(query, hit)
         if score > best_score:
             best_score = score
             best_url = url
@@ -335,39 +364,46 @@ def _parse_beatport_html(
     target_title: str,
     target_artist: str,
 ) -> tuple[str | None, int]:
-    """Last-resort raw-HTML fallback for search pages.
+    """Score per-track HTML cards when JSON ``tracks[]`` is empty.
 
-    Only runs when the page genuinely is a search-results page (validated
-    upstream via :func:`_extract_search_data`). On a 0-results homepage
-    fallback this returns ``(None, 0)`` because every ``/track/`` href on
-    the page would be a promoted/unrelated track that the fuzzy matcher
-    would happily but wrongly accept.
+    Only ``.track-card`` rows are candidates. Artwork ``/track/`` anchors
+    often have no visible text; the title lives beside them on the card.
+    A search-all blob or homepage module (top-10, promoted tracks) is
+    not a card, so this returns ``(None, 0)`` rather than matching it.
     """
     if _extract_search_data(html) is None:
         return None, 0
 
-    query = _store_query(target_title, target_artist)
     soup = BeautifulSoup(html, "html.parser")
-    links = soup.select("a[href*='/track/']")
+    cards = soup.select("article.track-card, .track-card")
+    if not cards:
+        return None, 0
+
+    query = _store_query(target_title, target_artist)
     best_url: str | None = None
     best_score = 0
 
-    for link in links[:15]:
-        title_text = link.get_text(" ", strip=True)
+    for card in cards[:15]:
+        track_link = card.select_one("a[href*='/track/']")
+        if not track_link:
+            continue
+        href = track_link.get("href", "")
+        if not href:
+            continue
+
+        title_el = card.select_one(".track-title")
+        title_text = (
+            title_el.get_text(" ", strip=True) if title_el else ""
+        ) or track_link.get_text(" ", strip=True)
         if not title_text:
             continue
 
-        # Walk up to the parent container and look for an artist link
-        artist_text = ""
-        parent = link.find_parent(["div", "li", "tr", "article"])
-        if parent:
-            artist_link = parent.select_one("a[href*='/artist/']")
-            if artist_link:
-                artist_text = artist_link.get_text(" ", strip=True)
-
-        href = link.get("href", "")
-        if not href:
-            continue
+        artist_names = [
+            artist_link.get_text(" ", strip=True)
+            for artist_link in card.select("a[href*='/artist/']")
+            if artist_link.get_text(" ", strip=True)
+        ]
+        artist_text = ", ".join(artist_names)
         url = href if href.startswith("http") else f"https://www.beatport.com{href}"
         score = _score_store_row(query, title_text, artist_text, url)
         if score > best_score:
