@@ -4,6 +4,7 @@ import {
   resolveLinksDisabled,
   cartButtonLabel,
   cartButtonDisabled,
+  shouldIgnoreCartClick,
 } from "../src/components/actionButtonFeedback.js";
 
 function expectResolveLabel(name, ctx, expected) {
@@ -23,6 +24,11 @@ function expectCartLabel(name, ctx, expected) {
 
 function expectCartDisabled(name, ctx, expected) {
   const actual = cartButtonDisabled(ctx);
+  assert.equal(actual, expected, name);
+}
+
+function expectIgnoreCartClick(name, ctx, expected) {
+  const actual = shouldIgnoreCartClick(ctx);
   assert.equal(actual, expected, name);
 }
 
@@ -159,6 +165,55 @@ expectCartDisabled(
   "Cart WS cart_started: both cart buttons stay disabled via isCartRunning",
   { cartStarting: null, isCartRunning: true },
   true,
+);
+
+// Idle queue: a Cart BP click is not ignored so the first click can fire
+expectIgnoreCartClick(
+  "Idle queue: a Cart BP click is not ignored so the first click can fire",
+  { cartInFlight: null, isCartRunning: false },
+  false,
+);
+
+// Click Cart BP, then spam Cart BP before any WebSocket event
+expectIgnoreCartClick(
+  "Click Cart BP then spam Cart BP before any WS event: ignored because cartInFlight is beatport",
+  { cartInFlight: "beatport", isCartRunning: false },
+  true,
+);
+
+// Click Cart BP, then spam Cart TS in the same moment (shared in-flight lock)
+expectIgnoreCartClick(
+  "Click Cart BP then spam Cart TS in the same moment: ignored because cartInFlight is already beatport",
+  { cartInFlight: "beatport", isCartRunning: false },
+  true,
+);
+
+// Click Cart TS, then spam
+expectIgnoreCartClick(
+  "Click Cart TS then spam: ignored because cartInFlight is traxsource",
+  { cartInFlight: "traxsource", isCartRunning: false },
+  true,
+);
+
+// After cart_started: still ignored so a second POST cannot start while Playwright is running
+expectIgnoreCartClick(
+  "After cart_started: still ignored so a second POST cannot start while Playwright is running",
+  { cartInFlight: null, isCartRunning: true },
+  true,
+);
+
+// After cart_complete: not ignored, buttons can be used again
+expectIgnoreCartClick(
+  "After cart_complete: not ignored, buttons can be used again",
+  { cartInFlight: null, isCartRunning: false },
+  false,
+);
+
+// After cart_error or a failed POST (same idle shape): not ignored
+expectIgnoreCartClick(
+  "After cart_error or a failed POST: not ignored",
+  { cartInFlight: null, isCartRunning: false },
+  false,
 );
 
 console.log("verify-action-button-feedback: all cases passed");
