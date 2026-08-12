@@ -25,3 +25,7 @@ export function cartButtonLabel({ store, cartStarting, isCartRunning }) {
 export function cartButtonDisabled({ cartStarting, isCartRunning }) {
   return cartStarting !== null || Boolean(isCartRunning);
 }
+
+export function shouldIgnoreCartClick({ cartInFlight, isCartRunning }) {
+  return cartInFlight === "beatport" || cartInFlight === "traxsource" || Boolean(isCartRunning);
+}

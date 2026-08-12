@@ -16,6 +16,7 @@ import {
   resolveLinksDisabled,
   cartButtonLabel,
   cartButtonDisabled,
+  shouldIgnoreCartClick,
 } from "./actionButtonFeedback";
 
 const REFRESH_EVENTS = [
@@ -52,6 +53,7 @@ export default function TrackQueue({ wsMessage }) {
   const [resolveProgress, setResolveProgress] = useState(null);
   const resolvingLinksRef = useRef(false);
   resolvingLinksRef.current = resolvingLinks;
+  const cartInFlightRef = useRef(null);
 
   const fetchData = useCallback(async () => {
     try {
@@ -101,6 +103,8 @@ export default function TrackQueue({ wsMessage }) {
       case "cart_started":
         setCartState({ store: p.store, phase: "logging_in", current: 0, total: 0, track: null });
         setCartingTrackId(null);
+        // Keep cartInFlightRef set until complete/error so a click in this
+        // same tick cannot POST again before isCartRunning re-renders.
         setCartStarting(null);
         break;
 
@@ -141,6 +145,8 @@ export default function TrackQueue({ wsMessage }) {
           failed: p.failed,
         });
         setCartingTrackId(null);
+        cartInFlightRef.current = null;
+        setCartStarting(null);
         break;
 
       case "cart_error":
@@ -150,6 +156,7 @@ export default function TrackQueue({ wsMessage }) {
           error: p.error,
         }));
         setCartingTrackId(null);
+        cartInFlightRef.current = null;
         setCartStarting(null);
         break;
 
@@ -235,11 +242,18 @@ export default function TrackQueue({ wsMessage }) {
     }
   };
 
+  const isCartRunning = cartState && (cartState.phase === "logging_in" || cartState.phase === "adding");
+
   const handleBuildCart = async (store) => {
+    if (shouldIgnoreCartClick({ cartInFlight: cartInFlightRef.current, isCartRunning })) {
+      return;
+    }
+    cartInFlightRef.current = store;
     setCartStarting(store);
     try {
       await buildCart(store);
     } catch (err) {
+      cartInFlightRef.current = null;
       setCartStarting(null);
       setError(`Cart build failed: ${err.message}`);
     }
@@ -286,8 +300,6 @@ export default function TrackQueue({ wsMessage }) {
   };
 
   const downloadedCount = tracks.filter((t) => t.status === "downloaded").length;
-
-  const isCartRunning = cartState && (cartState.phase === "logging_in" || cartState.phase === "adding");
   const dismissBanner = () => setCartState(null);
 
   /* ---- Render ---- */
