@@ -1,9 +1,9 @@
-"""Spotify playlist monitoring with OAuth, baseline/dedup scan, and WebSocket events.
+"""Spotify playlist monitoring with OAuth, dedup scan, and WebSocket events.
 
 Handles:
 - Spotipy OAuth2 with token caching
 - Fetching the current user's playlists
-- Scanning playlists for new tracks (baseline on first run, diff on subsequent)
+- Scanning playlists for new tracks (insert unseen as new, then snapshot)
 - 5-check dedup before inserting a track as 'new'
 - Snapshot persistence to Supabase
 """
@@ -236,7 +236,7 @@ def _is_in_itunes_library(artist_name: str, track_name: str) -> bool:
 
 
 async def scan_playlist(playlist_id: str, playlist_name: str) -> dict[str, Any]:
-    """Scan a single playlist: baseline on first run, diff on subsequent runs.
+    """Scan a single playlist: insert unseen tracks as new, then save a snapshot.
 
     Returns a summary dict with counts of new, baseline, skipped, and errored tracks.
     """
@@ -250,7 +250,7 @@ async def scan_playlist(playlist_id: str, playlist_name: str) -> dict[str, Any]:
     track_lookup = {t["spotify_id"]: t for t in playlist_tracks}
 
     snapshot = await asyncio.to_thread(get_playlist_snapshot, playlist_id)
-    is_baseline = snapshot is None
+    previous_ids: set[str] = set() if snapshot is None else set(snapshot.get("track_ids", []))
 
     genre = _detect_genre_for_playlist(playlist_name)
     stats: dict[str, Any] = {
@@ -263,94 +263,59 @@ async def scan_playlist(playlist_id: str, playlist_name: str) -> dict[str, Any]:
         "total": len(playlist_tracks),
     }
 
-    if is_baseline:
-        for idx, track_data in enumerate(playlist_tracks):
-            try:
-                await asyncio.to_thread(
-                    upsert_track,
-                    {
-                        **track_data,
-                        "status": "baseline",
-                        "source_playlist": playlist_name,
-                        "genre": genre,
-                    },
-                )
-                stats["baseline"] += 1
-            except Exception as exc:
-                stats["errors"] += 1
-                logger.error(
-                    "Failed to upsert baseline track '%s': %s",
-                    track_data.get("track_name", "?"), exc,
-                )
+    new_ids = [tid for tid in current_track_ids if tid not in previous_ids]
 
-            if (idx + 1) % 10 == 0:
-                await manager.broadcast("scan_progress", {
-                    "playlist": playlist_name,
-                    "processed": idx + 1,
-                    "total": stats["total"],
-                    "phase": "baseline",
-                })
-
-        logger.info(
-            "Baseline scan for '%s': %d stored, %d errors",
-            playlist_name, stats["baseline"], stats["errors"],
-        )
-
+    if new_ids:
+        # Batch DB lookup: one query instead of N individual lookups
+        already_in_db = await asyncio.to_thread(get_existing_spotify_ids, new_ids)
     else:
-        previous_ids = set(snapshot.get("track_ids", []))
-        new_ids = [tid for tid in current_track_ids if tid not in previous_ids]
+        already_in_db = set()
 
-        if new_ids:
-            # Batch DB lookup: one query instead of N individual lookups
-            already_in_db = await asyncio.to_thread(get_existing_spotify_ids, new_ids)
-        else:
-            already_in_db = set()
+    for idx, spotify_id in enumerate(new_ids):
+        track_data = track_lookup[spotify_id]
+        artist = track_data.get("artist_name", "")
+        title = track_data.get("track_name", "")
 
-        for idx, spotify_id in enumerate(new_ids):
-            track_data = track_lookup[spotify_id]
-            artist = track_data.get("artist_name", "")
-            title = track_data.get("track_name", "")
+        # Checks 1-4: track already exists in Supabase (any status)
+        if spotify_id in already_in_db:
+            stats["skipped_dup"] += 1
+            continue
 
-            # Checks 1-4: track already exists in Supabase (any status)
-            if spotify_id in already_in_db:
-                stats["skipped_dup"] += 1
-                continue
+        # Check 5: fuzzy match against Apple Music library
+        itunes_hit = await asyncio.to_thread(_is_in_itunes_library, artist, title)
+        if itunes_hit:
+            stats["skipped_itunes"] += 1
+            logger.debug("iTunes dedup hit: '%s - %s'", artist, title)
+            continue
 
-            # Check 5: fuzzy match against Apple Music library
-            itunes_hit = await asyncio.to_thread(_is_in_itunes_library, artist, title)
-            if itunes_hit:
-                stats["skipped_itunes"] += 1
-                logger.debug("iTunes dedup hit: '%s - %s'", artist, title)
-                continue
+        try:
+            await asyncio.to_thread(
+                upsert_track,
+                {
+                    **track_data,
+                    "status": "new",
+                    "source_playlist": playlist_name,
+                    "genre": genre,
+                },
+            )
+            stats["new"] += 1
+        except Exception as exc:
+            stats["errors"] += 1
+            logger.error("Failed to upsert new track '%s': %s", title, exc)
 
-            try:
-                await asyncio.to_thread(
-                    upsert_track,
-                    {
-                        **track_data,
-                        "status": "new",
-                        "source_playlist": playlist_name,
-                        "genre": genre,
-                    },
-                )
-                stats["new"] += 1
-            except Exception as exc:
-                stats["errors"] += 1
-                logger.error("Failed to upsert new track '%s': %s", title, exc)
+        if (idx + 1) % 5 == 0:
+            await manager.broadcast("scan_progress", {
+                "playlist": playlist_name,
+                "processed": idx + 1,
+                "total": len(new_ids),
+                "phase": "diff",
+            })
 
-            if (idx + 1) % 5 == 0:
-                await manager.broadcast("scan_progress", {
-                    "playlist": playlist_name,
-                    "processed": idx + 1,
-                    "total": len(new_ids),
-                    "phase": "diff",
-                })
-
-        logger.info(
-            "Diff scan for '%s': %d new, %d db-dups, %d iTunes-dups, %d errors (of %d unseen)",
-            playlist_name, stats["new"], stats["skipped_dup"],
-            stats["skipped_itunes"], stats["errors"], len(new_ids),
-        )
+    logger.info(
+        "Diff scan for '%s': %d new, %d db-dups, %d iTunes-dups, %d errors (of %d unseen)",
+        playlist_name, stats["new"], stats["skipped_dup"],
+        stats["skipped_itunes"], stats["errors"], len(new_ids),
+    )
 
     # Save updated snapshot (even if some tracks errored — snapshot reflects Spotify state)
     await asyncio.to_thread(
