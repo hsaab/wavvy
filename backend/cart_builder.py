@@ -115,6 +115,32 @@ def _dismiss_cookie_banner(page: Page, selector: str) -> None:
 # Beatport automation
 # ---------------------------------------------------------------------------
 
+def _wait_for_beatport_homepage(page: Page) -> None:
+    """Wait for Log In or the logged-in avatar; name a Cloudflare human check on timeout."""
+    login_or_avatar = page.locator(BP_LOGIN_TRIGGER).first.or_(
+        page.locator(BP_LOGGED_IN_INDICATOR).first,
+    )
+    try:
+        login_or_avatar.wait_for(state="visible", timeout=NAV_TIMEOUT_MS)
+    except PlaywrightTimeout:
+        title = ""
+        content = ""
+        try:
+            title = page.title() or ""
+            content = page.content() or ""
+        except Exception:
+            pass
+        combined = f"{title} {content}".lower()
+        if "just a moment" in combined or "verify you are human" in combined:
+            msg = (
+                "Beatport is blocked by a Cloudflare human check "
+                f"(page title: {title!r}). Complete the challenge in the browser window."
+            )
+            logger.error(msg)
+            raise RuntimeError(msg) from None
+        raise
+
+
 def _beatport_login(page: Page) -> bool:
     """Log in to Beatport via homepage modal → OAuth redirect → account.beatport.com."""
     username = os.environ.get("BEATPORT_EMAIL", "")
@@ -129,6 +155,7 @@ def _beatport_login(page: Page) -> bool:
     _dismiss_cookie_banner(page, BP_COOKIE_ACCEPT)
 
     try:
+        _wait_for_beatport_homepage(page)
         page.locator(BP_LOGIN_TRIGGER).first.click(timeout=5_000)
     except PlaywrightTimeout:
         logger.error("Login trigger not found on Beatport homepage")
@@ -171,6 +198,7 @@ def _beatport_is_logged_in(page: Page) -> bool:
     time.sleep(PAGE_LOAD_WAIT_SEC)
     _dismiss_cookie_banner(page, BP_COOKIE_ACCEPT)
     try:
+        _wait_for_beatport_homepage(page)
         return page.locator(BP_LOGGED_IN_INDICATOR).first.is_visible(timeout=5_000)
     except PlaywrightTimeout:
         return False
@@ -383,13 +411,20 @@ def build_cart(store: Store) -> dict[str, Any]:
 
 def _launch_browser(pw: Playwright, store: Store) -> tuple[BrowserContext, Page]:
     """Launch headed Chromium, restoring session cookies if available."""
-    browser: Browser = pw.chromium.launch(headless=True)
+    browser: Browser = pw.chromium.launch(
+        headless=False,
+        args=["--disable-blink-features=AutomationControlled"],
+    )
 
     storage = str(BROWSER_STATE_PATH) if BROWSER_STATE_PATH.exists() else None
     context = browser.new_context(
         storage_state=storage,
         viewport={"width": 1280, "height": 900},
         user_agent=_DESKTOP_CHROME_UA,
+    )
+    # Hide navigator.webdriver so Cloudflare does not treat Chromium as automation.
+    context.add_init_script(
+        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
     )
     context.set_default_timeout(NAV_TIMEOUT_MS)
     page = context.new_page()
