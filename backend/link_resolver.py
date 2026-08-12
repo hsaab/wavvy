@@ -21,10 +21,10 @@ import re
 
 import httpx
 from bs4 import BeautifulSoup
-from thefuzz import fuzz
 
 from beatport_browser import BeatportBrowser, BeatportBrowserError
 from database import get_supabase, update_track_fields
+from store_match import StoreQuery, parse_store_hit, parse_store_query, score_hit
 from traxsource_browser import TraxsourceBrowser, TraxsourceBrowserError
 from ws_manager import manager
 
@@ -81,32 +81,15 @@ def _classify_confidence(score: int) -> str:
     return "low"
 
 
-def _normalize(text: str) -> str:
-    """Strip parentheticals, brackets, punctuation — lowercase for matching."""
-    text = text.lower().strip()
-    text = re.sub(r"\(.*?\)", "", text)
-    text = re.sub(r"\[.*?\]", "", text)
-    text = re.sub(r"[^\w\s]", "", text)
-    return re.sub(r"\s+", " ", text).strip()
+def _store_query(title: str, artist: str) -> StoreQuery:
+    """Parse source identity once per search page."""
+    return parse_store_query(artist=artist, title=title)
 
 
-def _score_match(
-    target_title: str,
-    target_artist: str,
-    candidate_title: str,
-    candidate_artist: str,
-) -> int:
-    """Weighted fuzzy score: 60% title match + 40% artist match.
-
-    When candidate_artist is empty, falls back to combined string comparison.
-    """
-    if candidate_artist:
-        title_score = fuzz.token_sort_ratio(target_title, candidate_title)
-        artist_score = fuzz.token_sort_ratio(target_artist, candidate_artist)
-        return int(title_score * 0.6 + artist_score * 0.4)
-
-    combined_target = f"{target_artist} {target_title}"
-    return fuzz.token_sort_ratio(combined_target, candidate_title)
+def _score_store_row(query: StoreQuery, title: str, artist: str, url: str) -> int:
+    """Score a candidate through store_match (title parse only in this slice)."""
+    hit = parse_store_hit(title=title, artist=artist, url=url)
+    return score_hit(query, hit)
 
 
 # ---------------------------------------------------------------------------
@@ -263,27 +246,25 @@ def _best_beatport_track_match(
     target_artist: str,
 ) -> tuple[str | None, int]:
     """Score each track hit and return the best ``(url, score)`` pair."""
+    query = _store_query(target_title, target_artist)
     best_url: str | None = None
     best_score = 0
 
     for t in tracks[:15]:
         raw_name = t.get("track_name", "") or t.get("name", "")
-        candidate_title = _normalize(raw_name)
-        candidate_artist = _normalize(
-            " ".join(
-                a.get("artist_name", "") or a.get("name", "")
-                for a in t.get("artists", [])
-            )
+        artist_str = ", ".join(
+            a.get("artist_name", "") or a.get("name", "")
+            for a in t.get("artists", [])
         )
-        score = _score_match(
-            target_title, target_artist, candidate_title, candidate_artist,
-        )
-
         track_id = t.get("track_id") or t.get("id")
         slug = t.get("slug") or _slug_from_name(raw_name)
-        if track_id and slug and score > best_score:
+        if not track_id or not slug:
+            continue
+        url = f"https://www.beatport.com/track/{slug}/{track_id}"
+        score = _score_store_row(query, raw_name, artist_str, url)
+        if score > best_score:
             best_score = score
-            best_url = f"https://www.beatport.com/track/{slug}/{track_id}"
+            best_url = url
 
     return best_url, best_score
 
@@ -300,27 +281,25 @@ def _best_beatport_release_match(
     before the per-track page becomes browsable, so the release URL is
     the only purchase link we can offer until indexing catches up.
     """
+    query = _store_query(target_title, target_artist)
     best_url: str | None = None
     best_score = 0
 
     for r in releases[:15]:
         raw_name = r.get("release_name", "") or r.get("name", "")
-        candidate_title = _normalize(raw_name)
-        candidate_artist = _normalize(
-            " ".join(
-                a.get("artist_name", "") or a.get("name", "")
-                for a in r.get("artists", [])
-            )
+        artist_str = ", ".join(
+            a.get("artist_name", "") or a.get("name", "")
+            for a in r.get("artists", [])
         )
-        score = _score_match(
-            target_title, target_artist, candidate_title, candidate_artist,
-        )
-
         release_id = r.get("release_id") or r.get("id")
         slug = r.get("slug") or _slug_from_name(raw_name)
-        if release_id and slug and score > best_score:
+        if not release_id or not slug:
+            continue
+        url = f"https://www.beatport.com/release/{slug}/{release_id}"
+        score = _score_store_row(query, raw_name, artist_str, url)
+        if score > best_score:
             best_score = score
-            best_url = f"https://www.beatport.com/release/{slug}/{release_id}"
+            best_url = url
 
     return best_url, best_score
 
@@ -367,13 +346,14 @@ def _parse_beatport_html(
     if _extract_search_data(html) is None:
         return None, 0
 
+    query = _store_query(target_title, target_artist)
     soup = BeautifulSoup(html, "html.parser")
     links = soup.select("a[href*='/track/']")
     best_url: str | None = None
     best_score = 0
 
     for link in links[:15]:
-        title_text = _normalize(link.get_text())
+        title_text = link.get_text(" ", strip=True)
         if not title_text:
             continue
 
@@ -383,13 +363,16 @@ def _parse_beatport_html(
         if parent:
             artist_link = parent.select_one("a[href*='/artist/']")
             if artist_link:
-                artist_text = _normalize(artist_link.get_text())
+                artist_text = artist_link.get_text(" ", strip=True)
 
-        score = _score_match(target_title, target_artist, title_text, artist_text)
         href = link.get("href", "")
-        if href and score > best_score:
+        if not href:
+            continue
+        url = href if href.startswith("http") else f"https://www.beatport.com{href}"
+        score = _score_store_row(query, title_text, artist_text, url)
+        if score > best_score:
             best_score = score
-            best_url = href if href.startswith("http") else f"https://www.beatport.com{href}"
+            best_url = url
 
     return best_url, best_score
 
@@ -412,14 +395,11 @@ async def _beatport_search(
     cannot reach the page; the caller should treat that as a batch-level
     failure and avoid retrying for the rest of the batch.
     """
-    norm_title = _normalize(title)
-    norm_artist = _normalize(artist)
-
     html = await bp_browser.search(title, artist)
 
-    bp_url, score = _parse_beatport_next_data(html, norm_title, norm_artist)
+    bp_url, score = _parse_beatport_next_data(html, title, artist)
     if not bp_url:
-        bp_url, score = _parse_beatport_html(html, norm_title, norm_artist)
+        bp_url, score = _parse_beatport_html(html, title, artist)
 
     if bp_url and score < MIN_FALLBACK_SCORE:
         logger.info(
@@ -443,19 +423,41 @@ def _absolutize_traxsource(href: str) -> str:
 
 def _parse_traxsource_html(
     html: str,
-    target_title: str,
-    target_artist: str,
-    raw_query: str,
+    query: StoreQuery,
 ) -> tuple[str | None, int]:
     """Extract the best Traxsource track URL from a search-results page.
 
     Tries structured ``.trk-row`` rows first (title + artist cells, the
     reliable path), then falls back to scanning generic ``/track/`` and
-    ``/title/`` anchors with whatever artist context is nearby.
+    ``/title/`` anchors with whatever artist context is nearby. Slug text
+    from the URL is title and mix evidence; it is never treated as artist
+    credits.
     """
     soup = BeautifulSoup(html, "html.parser")
     best_url: str | None = None
     best_score = 0
+    best_rejected_score = 0
+    best_rejected_reason = "no candidates"
+    best_rejected_url: str | None = None
+
+    def consider(title: str, artist: str, href: str) -> None:
+        nonlocal best_url, best_score
+        nonlocal best_rejected_score, best_rejected_reason, best_rejected_url
+        if not href:
+            return
+        url = _absolutize_traxsource(href)
+        score = _score_store_row(query, title, artist, url)
+        if score >= MIN_FALLBACK_SCORE and score > best_score:
+            best_score = score
+            best_url = url
+            return
+        if score > best_rejected_score:
+            best_rejected_score = score
+            best_rejected_url = url
+            if score == 0:
+                best_rejected_reason = "remix gate or incompatible mix"
+            else:
+                best_rejected_reason = "below floor"
 
     # Preferred: structured track rows with separate title + artist cells.
     for row in soup.select(".trk-row, .search-trk-row")[:15]:
@@ -465,22 +467,16 @@ def _parse_traxsource_html(
         artist_el = row.select_one(
             ".trk-cell.artists a, .artists a, a[href*='/artist/']"
         )
-        row_title = _normalize(title_el.get_text())
-        row_artist = _normalize(artist_el.get_text()) if artist_el else ""
-
-        score = _score_match(target_title, target_artist, row_title, row_artist)
-        href = title_el.get("href", "")
-        if href and score > best_score:
-            best_score = score
-            best_url = _absolutize_traxsource(href)
+        row_title = title_el.get_text(" ", strip=True)
+        row_artist = artist_el.get_text(" ", strip=True) if artist_el else ""
+        consider(row_title, row_artist, title_el.get("href", ""))
 
     if best_url:
         return best_url, best_score
 
     # Fallback: generic track links without structured row context.
-    combined_target = _normalize(raw_query)
     for link in soup.select("a[href*='/track/'], a[href*='/title/']")[:15]:
-        text = _normalize(link.get_text())
+        text = link.get_text(" ", strip=True)
         if not text:
             continue
 
@@ -489,17 +485,16 @@ def _parse_traxsource_html(
         if parent:
             artist_el = parent.select_one("a[href*='/artist/']")
             if artist_el:
-                link_artist = _normalize(artist_el.get_text())
+                link_artist = artist_el.get_text(" ", strip=True)
 
-        if link_artist:
-            score = _score_match(target_title, target_artist, text, link_artist)
-        else:
-            score = fuzz.token_sort_ratio(combined_target, text)
+        consider(text, link_artist, link.get("href", ""))
 
-        href = link.get("href", "")
-        if href and score > best_score:
-            best_score = score
-            best_url = _absolutize_traxsource(href)
+    if not best_url:
+        logger.info(
+            "Traxsource best rejected score %d (%s) for candidate %s",
+            best_rejected_score, best_rejected_reason, best_rejected_url,
+        )
+        return None, 0
 
     return best_url, best_score
 
@@ -520,13 +515,10 @@ async def _traxsource_search(
     reporting ``not_found``. Raises :class:`TraxsourceBrowserError` on a
     browser/session failure; the caller decides how to handle it.
     """
-    norm_title = _normalize(title)
-    norm_artist = _normalize(artist)
-
     html = await ts_browser.search(title, artist)
 
     ts_url, score = _parse_traxsource_html(
-        html, norm_title, norm_artist, f"{artist} {title}",
+        html, parse_store_query(artist=artist, title=title),
     )
 
     if ts_url and score < MIN_FALLBACK_SCORE:
