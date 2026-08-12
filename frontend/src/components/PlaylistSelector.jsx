@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { getPlaylists, triggerScan, getSpotifyStatus, getSpotifyAuthUrl } from "../api";
 import { shouldAutoCloseScanModal } from "./scanModalClose.js";
 
@@ -10,8 +10,6 @@ export default function PlaylistSelector({ wsMessage, onClose }) {
   const [scanning, setScanning] = useState(false);
   const [scanProgress, setScanProgress] = useState(null);
   const [spotifyAuthed, setSpotifyAuthed] = useState(null);
-  const messageAtOpenRef = useRef(wsMessage);
-  const startedByThisModalRef = useRef(false);
 
   useEffect(() => {
     (async () => {
@@ -40,22 +38,7 @@ export default function PlaylistSelector({ wsMessage, onClose }) {
     if (wsMessage.type === "scan_batch_progress") {
       setScanProgress(wsMessage.payload);
     }
-    if (wsMessage.type === "scan_batch_complete") {
-      // Leftover lastMessage can still be this complete object. App passes an
-      // inline onClose, so parent re-renders re-run this effect. Only clear
-      // scanning UI when this modal's own scan finished.
-      if (
-        shouldAutoCloseScanModal(wsMessage, {
-          startedByThisModal: startedByThisModalRef.current,
-          messageAtOpen: messageAtOpenRef.current,
-        })
-      ) {
-        setScanning(false);
-        setScanProgress(null);
-        if (onClose) setTimeout(onClose, 800);
-      }
-    }
-  }, [wsMessage, onClose]);
+  }, [wsMessage]);
 
   const togglePlaylist = (id) => {
     setSelected((prev) => {
@@ -67,7 +50,6 @@ export default function PlaylistSelector({ wsMessage, onClose }) {
 
   const handleScan = async () => {
     if (selected.size === 0) return;
-    startedByThisModalRef.current = true;
     setScanning(true);
     setError(null);
     // #region agent log
@@ -79,6 +61,11 @@ export default function PlaylistSelector({ wsMessage, onClose }) {
       // #region agent log
       fetch('http://127.0.0.1:7458/ingest/b530fd28-deaa-4c3d-9cd6-e49423133f3b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5d0c12'},body:JSON.stringify({sessionId:'5d0c12',location:'PlaylistSelector.jsx:handleScan',message:'triggerScan response OK',data:{result},timestamp:Date.now(),hypothesisId:'H2'})}).catch(()=>{});
       // #endregion
+      if (shouldAutoCloseScanModal({ httpScanSucceeded: true })) {
+        setScanning(false);
+        setScanProgress(null);
+        if (onClose) setTimeout(onClose, 800);
+      }
     } catch (err) {
       // #region agent log
       fetch('http://127.0.0.1:7458/ingest/b530fd28-deaa-4c3d-9cd6-e49423133f3b',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'5d0c12'},body:JSON.stringify({sessionId:'5d0c12',location:'PlaylistSelector.jsx:handleScan',message:'triggerScan FAILED',data:{error:err.message},timestamp:Date.now(),hypothesisId:'H2'})}).catch(()=>{});
