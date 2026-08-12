@@ -1,5 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { getPlaylists, triggerScan, getSpotifyStatus, getSpotifyAuthUrl } from "../api";
+import { shouldAutoCloseScanModal } from "./scanModalClose.js";
 
 export default function PlaylistSelector({ wsMessage, onClose }) {
   const [playlists, setPlaylists] = useState([]);
@@ -9,6 +10,8 @@ export default function PlaylistSelector({ wsMessage, onClose }) {
   const [scanning, setScanning] = useState(false);
   const [scanProgress, setScanProgress] = useState(null);
   const [spotifyAuthed, setSpotifyAuthed] = useState(null);
+  const messageAtOpenRef = useRef(wsMessage);
+  const startedByThisModalRef = useRef(false);
 
   useEffect(() => {
     (async () => {
@@ -40,7 +43,15 @@ export default function PlaylistSelector({ wsMessage, onClose }) {
     if (wsMessage.type === "scan_batch_complete") {
       setScanning(false);
       setScanProgress(null);
-      if (onClose) setTimeout(onClose, 800);
+      if (
+        shouldAutoCloseScanModal(wsMessage, {
+          startedByThisModal: startedByThisModalRef.current,
+          messageAtOpen: messageAtOpenRef.current,
+        }) &&
+        onClose
+      ) {
+        setTimeout(onClose, 800);
+      }
     }
   }, [wsMessage, onClose]);
 
@@ -54,6 +65,7 @@ export default function PlaylistSelector({ wsMessage, onClose }) {
 
   const handleScan = async () => {
     if (selected.size === 0) return;
+    startedByThisModalRef.current = true;
     setScanning(true);
     setError(null);
     // #region agent log
