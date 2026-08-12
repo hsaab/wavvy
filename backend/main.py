@@ -52,6 +52,9 @@ async def lifespan(app: FastAPI):
     # Start file pipeline (watchdog on ~/Downloads)
     pipeline.start()
 
+    import cart_builder
+    cart_builder._loop = asyncio.get_running_loop()
+
     yield
 
     pipeline.stop()
@@ -340,6 +343,7 @@ async def build_cart_endpoint(body: dict):
     """
     from fastapi import HTTPException
     from cart_builder import build_cart, is_running
+    import cart_builder
     from database import get_tracks_by_status
     from link_resolver import resolve_tracks
 
@@ -384,6 +388,7 @@ async def build_cart_endpoint(body: dict):
             detail=f"No approved tracks have {store_label} links. Resolve links first, then try again.",
         )
 
+    cart_builder._loop = asyncio.get_running_loop()
     asyncio.create_task(asyncio.to_thread(build_cart, store))
 
     return {"ok": True, "message": f"Cart build started for {store}"}
