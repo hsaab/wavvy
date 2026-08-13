@@ -63,6 +63,8 @@ from playwright.async_api import (
     async_playwright,
 )
 
+from store_match import build_search_query, parse_store_query
+
 logger = logging.getLogger(__name__)
 
 SEARCH_URL_TEMPLATE = "https://www.beatport.com/search?q={query}"
@@ -110,6 +112,11 @@ class BeatportChallengeError(BeatportBrowserError):
     this loudly is intentional — a silent challenge previously made every
     search look like a no-results hit, so links never got resolved.
     """
+
+
+def _identity_query_text(title: str, artist: str) -> str:
+    """Identity query from raw artist/title. Do not pass a prebuilt query here."""
+    return build_search_query(parse_store_query(artist=artist, title=title))
 
 
 def _is_cloudflare_challenge(page, html: str) -> bool:
@@ -230,7 +237,7 @@ class BeatportBrowser:
         with a ``search-all`` query key.
         """
         context = await self._new_context()
-        query = quote_plus(f"{artist} {title}".strip())
+        query = quote_plus(_identity_query_text(title, artist))
         url = SEARCH_URL_TEMPLATE.format(query=query)
 
         try:
