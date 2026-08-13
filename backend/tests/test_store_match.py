@@ -185,3 +185,20 @@ def test_search_words_for_a_plain_title_are_the_song_name_and_the_first_artist()
     query = _query("Elfenberg", "Kigelia")
 
     assert build_search_query(query) == "Kigelia Elfenberg"
+
+
+def test_unnamed_remix_binds_a_remix_row_instead_of_scoring_zero() -> None:
+    """Bare '(Remix)' has no remixer name; a true remix hit must still bind."""
+    query = _query("Gab Rhome, Mark Alow", "Bob Fossil (Remix)")
+    original = _hit(
+        "Bob Fossil (Original Mix)", "Gab Rhome, Mark Alow", BEATPORT_BOB_FOSSIL_ORIGINAL,
+    )
+    remix = _hit(
+        "Bob Fossil (Armen Miran Remix)", "Gab Rhome, Mark Alow", BEATPORT_BOB_FOSSIL_REMIX,
+    )
+
+    assert query.mix_kind == "remix"
+    assert query.remixers == []
+    assert score_hit(query, original) == 0
+    assert score_hit(query, remix) >= ACCEPT_FLOOR
+    assert _best_url("Gab Rhome, Mark Alow", "Bob Fossil (Remix)", [original, remix]) == remix.url

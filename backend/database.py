@@ -82,6 +82,58 @@ def get_tracks_by_statuses(
     return all_rows
 
 
+def get_tracks_needing_resolution(statuses: list[str]) -> list[dict[str, Any]]:
+    """Tracks in *statuses* that are missing a Beatport or Traxsource URL.
+
+    Pages past PostgREST's silent 1000-row cap so auto-resolve cannot skip
+    the rest of a large backlog.
+    """
+    all_rows: list[dict[str, Any]] = []
+    page_size = 1000
+    offset = 0
+    while True:
+        result = (
+            get_supabase()
+            .table("tracks")
+            .select("*")
+            .in_("status", statuses)
+            .or_("beatport_url.is.null,traxsource_url.is.null")
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        all_rows.extend(result.data)
+        if len(result.data) < page_size:
+            break
+        offset += page_size
+    return all_rows
+
+
+def get_tracks_by_ids(track_ids: list[int]) -> list[dict[str, Any]]:
+    """Fetch tracks by primary key, paging past the PostgREST 1000-row cap."""
+    if not track_ids:
+        return []
+
+    all_rows: list[dict[str, Any]] = []
+    page_size = 1000
+    for i in range(0, len(track_ids), page_size):
+        chunk = track_ids[i : i + page_size]
+        offset = 0
+        while True:
+            result = (
+                get_supabase()
+                .table("tracks")
+                .select("*")
+                .in_("id", chunk)
+                .range(offset, offset + page_size - 1)
+                .execute()
+            )
+            all_rows.extend(result.data)
+            if len(result.data) < page_size:
+                break
+            offset += page_size
+    return all_rows
+
+
 def get_track_by_spotify_id(spotify_id: str) -> dict[str, Any] | None:
     """Return a single track row or None."""
     result = (
