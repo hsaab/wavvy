@@ -60,7 +60,7 @@ def _normalize_text(text: str) -> str:
     """Shared normalization for both filenames and DB strings."""
     text = _strip_diacritics(text)
     # Beatport replaces apostrophes with underscores in filenames
-    text = text.replace("_", " ")
+    text = text.replace("_", "")
     # Strip all apostrophe variants so Ain't == Aint == Ain t
     text = text.replace("'", "").replace("\u2019", "").replace("`", "")
     # Remove parenthetical mix labels: "(Original Mix)", "(Extended Mix)", etc.
