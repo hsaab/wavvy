@@ -149,6 +149,13 @@ def _cloudflare_challenge_page() -> tuple[MagicMock, list[int]]:
 
     page.locator.side_effect = lambda selector, **_kw: make_locator(selector)
     page.wait_for_selector.side_effect = wait_for_selector
+
+    def wait_for_function(_expr: object, timeout: int | None = None, **_kwargs: object) -> None:
+        if timeout is not None:
+            homepage_timeouts.append(timeout)
+        raise PlaywrightTimeout("Timeout")
+
+    page.wait_for_function.side_effect = wait_for_function
     return page, homepage_timeouts
 
 
@@ -187,6 +194,50 @@ def test_human_check_page_waits_for_log_in_and_names_the_challenge():
         "and the failure must name the human check, not only "
         "'Login trigger not found on Beatport homepage'; "
         f"got timeouts {homepage_timeouts!r} and {logged!r}"
+    )
+
+
+def test_cart_bp_loads_beatport_homepage_only_once():
+    """Cart BP must not goto beatport.com a second time after the human check, which restarts Cloudflare."""
+    page = MagicMock()
+    page.url = ""
+    page.title.return_value = "Beatport | DJ & Electronic Dance Music"
+    page.content.return_value = "Log In"
+
+    def make_locator(selector: str = "") -> MagicMock:
+        loc = MagicMock()
+        loc.first = loc
+        text = str(selector)
+        is_login = "Log In" in text or text == BP_LOGIN_TRIGGER
+        is_avatar = "account_avatar" in text or text == BP_LOGGED_IN_INDICATOR
+        loc.is_visible.return_value = is_login and not is_avatar
+        loc.wait_for.return_value = None
+        loc.click.return_value = None
+        loc.fill.return_value = None
+        loc.or_.side_effect = lambda _other: make_locator("Log In or avatar")
+        return loc
+
+    page.locator.side_effect = lambda selector, **_kw: make_locator(selector)
+    page.wait_for_function.return_value = None
+    page.wait_for_url.side_effect = PlaywrightTimeout("Timeout")
+
+    env = {"BEATPORT_EMAIL": "dj@example.com", "BEATPORT_PASSWORD": "secret"}
+    with (
+        patch.dict(os.environ, env, clear=False),
+        patch.object(cart_builder.time, "sleep"),
+    ):
+        try:
+            cart_builder._ensure_logged_in(page, "beatport")
+        except RuntimeError:
+            pass
+
+    goto_urls = [str(call.args[0]) for call in page.goto.call_args_list if call.args]
+    homepage_loads = [
+        url for url in goto_urls if str(url).rstrip("/") == "https://www.beatport.com"
+    ]
+    assert len(homepage_loads) == 1, (
+        "loading www.beatport.com twice restarts the Cloudflare human check; "
+        f"got gotos {goto_urls!r}"
     )
 
 

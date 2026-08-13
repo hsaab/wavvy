@@ -115,30 +115,142 @@ def _dismiss_cookie_banner(page: Page, selector: str) -> None:
 # Beatport automation
 # ---------------------------------------------------------------------------
 
+def _page_url(page: Page) -> str:
+    url = getattr(page, "url", "") or ""
+    return url if isinstance(url, str) else ""
+
+
+def _cloudflare_blocking(page: Page) -> bool:
+    try:
+        title = (page.title() or "").lower()
+        content = (page.content() or "").lower()
+    except Exception:
+        return False
+    combined = f"{title} {content}"
+    return "just a moment" in combined or "verify you are human" in combined
+
+
+def _raise_cloudflare_block(page: Page) -> None:
+    title = ""
+    try:
+        title = page.title() or ""
+    except Exception:
+        pass
+    msg = (
+        "Beatport is blocked by a Cloudflare human check "
+        f"(page title: {title!r}). Complete the challenge in the browser window."
+    )
+    logger.error(msg)
+    raise RuntimeError(msg) from None
+
+
+def _wait_until_cloudflare_clears(page: Page) -> None:
+    """Do not click Log In (or cookies) while the human-check overlay is still up."""
+    if not _cloudflare_blocking(page):
+        return
+    try:
+        page.wait_for_function(
+            "() => !/just a moment/i.test(document.title) "
+            "&& !/verify you are human/i.test("
+            "document.body ? document.body.innerText : '')",
+            timeout=NAV_TIMEOUT_MS,
+        )
+    except PlaywrightTimeout:
+        _raise_cloudflare_block(page)
+    if _cloudflare_blocking(page):
+        _raise_cloudflare_block(page)
+
+
 def _wait_for_beatport_homepage(page: Page) -> None:
     """Wait for Log In or the logged-in avatar; name a Cloudflare human check on timeout."""
+    _wait_until_cloudflare_clears(page)
     login_or_avatar = page.locator(BP_LOGIN_TRIGGER).first.or_(
         page.locator(BP_LOGGED_IN_INDICATOR).first,
     )
     try:
         login_or_avatar.wait_for(state="visible", timeout=NAV_TIMEOUT_MS)
     except PlaywrightTimeout:
-        title = ""
-        content = ""
-        try:
-            title = page.title() or ""
-            content = page.content() or ""
-        except Exception:
-            pass
-        combined = f"{title} {content}".lower()
-        if "just a moment" in combined or "verify you are human" in combined:
-            msg = (
-                "Beatport is blocked by a Cloudflare human check "
-                f"(page title: {title!r}). Complete the challenge in the browser window."
-            )
-            logger.error(msg)
-            raise RuntimeError(msg) from None
+        if _cloudflare_blocking(page):
+            _raise_cloudflare_block(page)
         raise
+    if _cloudflare_blocking(page):
+        _wait_until_cloudflare_clears(page)
+
+
+def _open_beatport_homepage(page: Page) -> None:
+    """Load www.beatport.com once and wait out Cloudflare before touching the page."""
+    page.goto(BEATPORT_BASE_URL, timeout=NAV_TIMEOUT_MS)
+    time.sleep(PAGE_LOAD_WAIT_SEC)
+    _wait_for_beatport_homepage(page)
+    _dismiss_cookie_banner(page, BP_COOKIE_ACCEPT)
+
+
+def _beatport_avatar_visible(page: Page) -> bool:
+    try:
+        return page.locator(BP_LOGGED_IN_INDICATOR).first.is_visible(timeout=2_000)
+    except PlaywrightTimeout:
+        return False
+
+
+def _already_on_beatport_home(page: Page) -> bool:
+    if not _page_url(page).startswith(BEATPORT_BASE_URL):
+        return False
+    try:
+        login_or_avatar = page.locator(BP_LOGIN_TRIGGER).first.or_(
+            page.locator(BP_LOGGED_IN_INDICATOR).first,
+        )
+        return login_or_avatar.is_visible(timeout=1_000)
+    except PlaywrightTimeout:
+        return False
+
+
+def _beatport_submit_credentials(page: Page, username: str, password: str) -> bool:
+    """Click Log In on the current homepage and complete the OAuth form. No extra goto."""
+    try:
+        page.locator(BP_LOGIN_TRIGGER).first.click(timeout=5_000)
+    except PlaywrightTimeout:
+        logger.error("Login trigger not found on Beatport homepage")
+        return False
+
+    try:
+        page.wait_for_url(f"{BEATPORT_AUTH_URL}/**", timeout=NAV_TIMEOUT_MS)
+    except PlaywrightTimeout:
+        if _cloudflare_blocking(page):
+            _raise_cloudflare_block(page)
+        logger.error("Did not redirect to account.beatport.com")
+        return False
+
+    time.sleep(PAGE_LOAD_WAIT_SEC)
+    _wait_until_cloudflare_clears(page)
+
+    try:
+        page.locator(BP_EMAIL_INPUT).first.wait_for(state="visible", timeout=NAV_TIMEOUT_MS)
+    except PlaywrightTimeout:
+        if _cloudflare_blocking(page):
+            _raise_cloudflare_block(page)
+        logger.error("Did not redirect to account.beatport.com")
+        return False
+
+    page.locator(BP_EMAIL_INPUT).first.fill(username)
+    page.locator(BP_PASSWORD_INPUT).first.fill(password)
+    page.locator(BP_LOGIN_SUBMIT).first.click()
+
+    try:
+        page.wait_for_url(f"{BEATPORT_BASE_URL}/**", timeout=NAV_TIMEOUT_MS)
+    except PlaywrightTimeout:
+        logger.warning("Did not redirect back to Beatport after login")
+        return False
+
+    time.sleep(PAGE_LOAD_WAIT_SEC)
+    _wait_for_beatport_homepage(page)
+    _dismiss_cookie_banner(page, BP_COOKIE_ACCEPT)
+
+    if _beatport_avatar_visible(page):
+        logger.info("Beatport login successful")
+        return True
+
+    logger.warning("Beatport login may have failed — indicator not found")
+    return False
 
 
 def _beatport_login(page: Page) -> bool:
@@ -149,59 +261,17 @@ def _beatport_login(page: Page) -> bool:
         logger.error("BEATPORT_EMAIL / BEATPORT_PASSWORD not set in .env")
         return False
 
-    # Step 1: Go to homepage and open login modal
-    page.goto(BEATPORT_BASE_URL, timeout=NAV_TIMEOUT_MS)
-    time.sleep(PAGE_LOAD_WAIT_SEC)
-    _dismiss_cookie_banner(page, BP_COOKIE_ACCEPT)
+    if not _already_on_beatport_home(page):
+        _open_beatport_homepage(page)
+        if _beatport_avatar_visible(page):
+            return True
 
-    try:
-        _wait_for_beatport_homepage(page)
-        page.locator(BP_LOGIN_TRIGGER).first.click(timeout=5_000)
-    except PlaywrightTimeout:
-        logger.error("Login trigger not found on Beatport homepage")
-        return False
-
-    # Step 3: Wait for redirect to account.beatport.com, fill credentials
-    try:
-        page.wait_for_url(f"{BEATPORT_AUTH_URL}/**", timeout=NAV_TIMEOUT_MS)
-    except PlaywrightTimeout:
-        logger.error("Did not redirect to account.beatport.com")
-        return False
-
-    time.sleep(PAGE_LOAD_WAIT_SEC)
-
-    page.locator(BP_EMAIL_INPUT).first.fill(username)
-    page.locator(BP_PASSWORD_INPUT).first.fill(password)
-    page.locator(BP_LOGIN_SUBMIT).first.click()
-
-    # Step 4: Wait for OAuth redirect back to beatport.com
-    try:
-        page.wait_for_url(f"{BEATPORT_BASE_URL}/**", timeout=NAV_TIMEOUT_MS)
-    except PlaywrightTimeout:
-        logger.warning("Did not redirect back to Beatport after login")
-        return False
-
-    time.sleep(PAGE_LOAD_WAIT_SEC)
-    _dismiss_cookie_banner(page, BP_COOKIE_ACCEPT)
-
-    if page.locator(BP_LOGGED_IN_INDICATOR).first.is_visible(timeout=5_000):
-        logger.info("Beatport login successful")
-        return True
-
-    logger.warning("Beatport login may have failed — indicator not found")
-    return False
+    return _beatport_submit_credentials(page, username, password)
 
 
 def _beatport_is_logged_in(page: Page) -> bool:
-    """Check if we already have a valid Beatport session."""
-    page.goto(BEATPORT_BASE_URL, timeout=NAV_TIMEOUT_MS)
-    time.sleep(PAGE_LOAD_WAIT_SEC)
-    _dismiss_cookie_banner(page, BP_COOKIE_ACCEPT)
-    try:
-        _wait_for_beatport_homepage(page)
-        return page.locator(BP_LOGGED_IN_INDICATOR).first.is_visible(timeout=5_000)
-    except PlaywrightTimeout:
-        return False
+    """True when the current page already shows a logged-in Beatport avatar."""
+    return _beatport_avatar_visible(page)
 
 
 def _beatport_add_track(page: Page, track: dict[str, Any]) -> bool:
@@ -434,9 +504,15 @@ def _launch_browser(pw: Playwright, store: Store) -> tuple[BrowserContext, Page]
 def _ensure_logged_in(page: Page, store: Store) -> None:
     """Check session validity; log in if needed."""
     if store == "beatport":
-        if not _beatport_is_logged_in(page):
-            if not _beatport_login(page):
-                raise RuntimeError("Failed to log in to Beatport")
+        _open_beatport_homepage(page)
+        if _beatport_avatar_visible(page):
+            return
+        username = os.environ.get("BEATPORT_EMAIL", "")
+        password = os.environ.get("BEATPORT_PASSWORD", "")
+        if not username or not password:
+            raise RuntimeError("BEATPORT_EMAIL / BEATPORT_PASSWORD not set in .env")
+        if not _beatport_submit_credentials(page, username, password):
+            raise RuntimeError("Failed to log in to Beatport")
     else:
         if not _traxsource_is_logged_in(page):
             if not _traxsource_login(page):
