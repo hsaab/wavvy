@@ -25,6 +25,7 @@ class _PagedQuery:
     def __init__(self, pages: list[list[dict]]) -> None:
         self.pages = pages
         self.range_calls: list[tuple[int, int]] = []
+        self.order_calls: list[tuple[tuple, dict]] = []
         self._idx = 0
 
     def select(self, *args: object, **kwargs: object) -> "_PagedQuery":
@@ -34,6 +35,10 @@ class _PagedQuery:
         return self
 
     def or_(self, *args: object, **kwargs: object) -> "_PagedQuery":
+        return self
+
+    def order(self, *args: object, **kwargs: object) -> "_PagedQuery":
+        self.order_calls.append((args, kwargs))
         return self
 
     def range(self, start: int, end: int) -> "_PagedQuery":
@@ -75,6 +80,7 @@ def test_tracks_needing_resolution_pages_past_the_postgrest_cap() -> None:
     assert len(rows) == 1001
     assert rows[-1]["id"] == 1000
     assert query.range_calls == [(0, 999), (1000, 1999)]
+    assert query.order_calls == [(("id",), {})] * 2
 
 
 def test_tracks_by_ids_uses_range_so_the_query_is_not_unbounded() -> None:

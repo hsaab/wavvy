@@ -98,6 +98,7 @@ def get_tracks_needing_resolution(statuses: list[str]) -> list[dict[str, Any]]:
             .select("*")
             .in_("status", statuses)
             .or_("beatport_url.is.null,traxsource_url.is.null")
+            .order("id")
             .range(offset, offset + page_size - 1)
             .execute()
         )
