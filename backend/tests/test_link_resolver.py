@@ -32,7 +32,8 @@ class _CannedBeatportBrowser:
     def __init__(self, html: str) -> None:
         self.html = html
 
-    async def search(self, title: str, artist: str) -> str:
+    async def search(self, *args: object, **kwargs: object) -> str:
+        # Slice 3 may pass a prebuilt query string instead of title, artist.
         return self.html
 
 
