@@ -119,12 +119,23 @@ def score_hit(query: StoreQuery, hit: StoreHit) -> int:
                 "Remix gate rejected %s: original or no-mix hit", hit.url,
             )
             return 0
-        if not _remixer_overlap(query, hit):
+        if query.remixers:
+            if not _remixer_overlap(query, hit):
+                logger.debug(
+                    "Remix gate rejected %s: no remixer overlap", hit.url,
+                )
+                return 0
+            mix_confirmed = True
+        elif _is_remix_hit(hit):
+            # Bare "(Remix)" has no remixer name. Still require a remix row,
+            # but do not demand a name overlap that can never succeed.
+            mix_confirmed = True
+        else:
             logger.debug(
-                "Remix gate rejected %s: no remixer overlap", hit.url,
+                "Remix gate rejected %s: unnamed remix vs non-remix mix",
+                hit.url,
             )
             return 0
-        mix_confirmed = True
 
     title_score = fuzz.token_sort_ratio(query.title_core, hit.title_core)
     # Slug mix words must not carry a hit whose base title does not match.

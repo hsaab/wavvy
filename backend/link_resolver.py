@@ -23,8 +23,19 @@ import httpx
 from bs4 import BeautifulSoup
 
 from beatport_browser import BeatportBrowser, BeatportBrowserError
-from database import get_supabase, update_track_fields
-from store_match import StoreHit, StoreQuery, parse_store_hit, parse_store_query, score_hit
+from database import (
+    get_tracks_by_ids,
+    get_tracks_needing_resolution,
+    update_track_fields,
+)
+from store_match import (
+    StoreHit,
+    StoreQuery,
+    build_search_query,
+    parse_store_hit,
+    parse_store_query,
+    score_hit,
+)
 from traxsource_browser import TraxsourceBrowser, TraxsourceBrowserError
 from ws_manager import manager
 
@@ -84,6 +95,11 @@ def _classify_confidence(score: int) -> str:
 def _store_query(title: str, artist: str) -> StoreQuery:
     """Parse source identity once per search page."""
     return parse_store_query(artist=artist, title=title)
+
+
+def _identity_search_query(title: str, artist: str) -> str:
+    """One store search string: title core plus first remixer or first artist."""
+    return build_search_query(_store_query(title, artist))
 
 
 def _score_store_row(query: StoreQuery, title: str, artist: str, url: str) -> int:
@@ -418,7 +434,7 @@ async def _beatport_search(
     title: str,
     artist: str,
 ) -> tuple[str | None, int]:
-    """Search Beatport for *artist — title*. Returns (url, fuzzy_score).
+    """Search Beatport with one identity query. Returns (url, fuzzy_score).
 
     Fetches the search page through a real Chromium session (``bp_browser``)
     because Beatport sits behind Cloudflare's JS challenge. Callers must
@@ -431,7 +447,7 @@ async def _beatport_search(
     cannot reach the page; the caller should treat that as a batch-level
     failure and avoid retrying for the rest of the batch.
     """
-    html = await bp_browser.search(title, artist)
+    html = await bp_browser.search(_identity_search_query(title, artist))
 
     bp_url, score = _parse_beatport_next_data(html, title, artist)
     if not bp_url:
@@ -540,7 +556,7 @@ async def _traxsource_search(
     title: str,
     artist: str,
 ) -> tuple[str | None, int]:
-    """Search Traxsource for *artist — title*. Returns (url, fuzzy_score).
+    """Search Traxsource with one identity query. Returns (url, fuzzy_score).
 
     Fetches the search page through a real Chromium session (``ts_browser``)
     because Traxsource now sits behind Cloudflare's JS challenge — plain
@@ -551,7 +567,7 @@ async def _traxsource_search(
     reporting ``not_found``. Raises :class:`TraxsourceBrowserError` on a
     browser/session failure; the caller decides how to handle it.
     """
-    html = await ts_browser.search(title, artist)
+    html = await ts_browser.search(_identity_search_query(title, artist))
 
     ts_url, score = _parse_traxsource_html(
         html, parse_store_query(artist=artist, title=title),
@@ -622,6 +638,7 @@ async def resolve_track(
     # Track the best fuzzy score across fallbacks
     # If Odesli gave one link, start from a 100-baseline for that link
     best_score = 100 if (result["beatport_url"] or result["traxsource_url"]) else 0
+    beatport_session_error: str | None = None
 
     # --- Step 2: Beatport scraping fallback (via Playwright) ---
     if not result["beatport_url"] and title and artist:
@@ -635,13 +652,14 @@ async def resolve_track(
                     result["beatport_url"] = bp_url
                     best_score = max(best_score, bp_score)
             except BeatportBrowserError as exc:
-                # Browser-level failure: re-raise so the batch can short-circuit
-                # Beatport lookups for the remaining tracks instead of retrying
-                # an already-broken session.
+                # Do not re-raise: Traxsource (and any Odesli URL already on
+                # *result*) must still land. The batch reads the flag below
+                # and skips Beatport for later tracks.
                 logger.warning(
                     "Beatport browser error for '%s - %s': %s", artist, title, exc,
                 )
-                raise
+                result["errors"].append(f"beatport: {exc}")
+                beatport_session_error = str(exc)
             except Exception as exc:
                 # Parsing / unexpected failure — track it but keep batch going.
                 logger.warning(
@@ -680,6 +698,10 @@ async def resolve_track(
         result["confidence_score"] = best_score
         result["match_confidence"] = _classify_confidence(best_score)
 
+    if beatport_session_error is not None:
+        result["_beatport_session_failed"] = True
+        result["_beatport_session_error"] = beatport_session_error
+
     return result
 
 
@@ -694,15 +716,7 @@ def _fetch_tracks_needing_resolution() -> list[dict]:
     that had been approved or cart-failed before resolution ever ran. We now
     include all statuses where a link could still affect downstream actions.
     """
-    return (
-        get_supabase()
-        .table("tracks")
-        .select("*")
-        .in_("status", list(RESOLVABLE_STATUSES))
-        .or_("beatport_url.is.null,traxsource_url.is.null")
-        .execute()
-        .data
-    )
+    return get_tracks_needing_resolution(list(RESOLVABLE_STATUSES))
 
 
 # Single-flight guard. Two callers can fire the auto-resolve background task
@@ -740,14 +754,7 @@ async def _run_resolve_batch(track_ids: list[int] | None = None) -> dict:
     ``batch_error`` set so the UI can surface it.
     """
     if track_ids:
-        rows = (
-            get_supabase()
-            .table("tracks")
-            .select("*")
-            .in_("id", track_ids)
-            .execute()
-        )
-        tracks = rows.data
+        tracks = get_tracks_by_ids(track_ids)
     else:
         tracks = _fetch_tracks_needing_resolution()
 
@@ -794,6 +801,11 @@ async def _run_resolve_batch(track_ids: list[int] | None = None) -> dict:
                         ts_browser,
                     )
 
+                    session_failed = bool(
+                        resolved.pop("_beatport_session_failed", False)
+                    )
+                    session_error = resolved.pop("_beatport_session_error", None)
+
                     update_payload: dict = {
                         "match_confidence": resolved["match_confidence"],
                         "confidence_score": resolved["confidence_score"],
@@ -807,33 +819,25 @@ async def _run_resolve_batch(track_ids: list[int] | None = None) -> dict:
 
                     results.append({"track_id": track_id, "label": label, **resolved})
 
-                    if resolved.get("errors"):
+                    if session_failed and not batch_error:
+                        batch_error = (
+                            f"Beatport browser session failed: {session_error}. "
+                            f"Remaining tracks skipped Beatport fallback."
+                        )
+                        logger.error(batch_error)
+                        await manager.broadcast("resolve_error", {
+                            "track_id": track_id,
+                            "label": label,
+                            "batch_error": batch_error,
+                            "errors": resolved.get("errors", []),
+                        })
+                    elif resolved.get("errors"):
                         await manager.broadcast("resolve_error", {
                             "track_id": track_id,
                             "label": label,
                             "errors": resolved["errors"],
                         })
 
-                except BeatportBrowserError as exc:
-                    # Browser died mid-batch — stop using it for the rest of the
-                    # tracks but keep going so Odesli/Traxsource results still land.
-                    batch_error = (
-                        f"Beatport browser session failed: {exc}. "
-                        f"Remaining tracks skipped Beatport fallback."
-                    )
-                    logger.error(batch_error)
-                    results.append({
-                        "track_id": track_id,
-                        "label": label,
-                        "error": str(exc),
-                        "match_confidence": "not_found",
-                        "errors": [f"beatport: {exc}"],
-                    })
-                    await manager.broadcast("resolve_error", {
-                        "track_id": track_id,
-                        "label": label,
-                        "batch_error": batch_error,
-                    })
                 except Exception as exc:
                     logger.error("Resolve failed for %s: %s", label, exc)
                     results.append({
