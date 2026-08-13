@@ -14,6 +14,7 @@ import cart_builder
 from store_selectors import (
     BP_LOGGED_IN_INDICATOR,
     BP_LOGIN_TRIGGER,
+    MANUAL_LOGIN_TIMEOUT_MS,
     NAV_TIMEOUT_MS,
 )
 
@@ -53,34 +54,36 @@ def _init_script_sources(*mocks: MagicMock) -> list[str]:
 
 
 def test_clicking_cart_bp_launches_headed_chrome_without_bot_fingerprints():
-    """Cart BP opens headed Chromium that looks like desktop Chrome, not HeadlessChrome or webdriver."""
+    """Cart BP opens headed Google Chrome with a dedicated profile, not HeadlessChrome."""
     pw = MagicMock()
-    browser = MagicMock()
     context = MagicMock()
     page = MagicMock()
-    pw.chromium.launch.return_value = browser
-    browser.new_context.return_value = context
-    context.new_page.return_value = page
+    context.pages = [page]
+    pw.chromium.launch_persistent_context.return_value = context
 
     returned_context, returned_page = cart_builder._launch_browser(pw, "beatport")
 
     assert returned_context is context
     assert returned_page is page
-    launch_kwargs = pw.chromium.launch.call_args.kwargs
+    pw.chromium.launch.assert_not_called()
+    call = pw.chromium.launch_persistent_context.call_args
+    assert call.args, "launch_persistent_context needs a user_data_dir"
+    assert "chrome_profile" in str(call.args[0])
+    launch_kwargs = call.kwargs
+    assert launch_kwargs.get("channel") == "chrome"
     assert launch_kwargs.get("headless") is False, (
-        "Cart BP must launch headed Chromium (headless=False); "
-        "headless Chrome is fingerprinted as HeadlessChrome and Cloudflare shows Just a moment"
+        "Cart BP must launch headed Chrome (headless=False); "
+        "headless Chrome is fingerprinted and Cloudflare shows Just a moment"
     )
     launch_args = [str(arg) for arg in (launch_kwargs.get("args") or [])]
     assert any("disable-blink-features=AutomationControlled" in arg for arg in launch_args), (
-        "chromium.launch args must include --disable-blink-features=AutomationControlled; "
+        "launch args must include --disable-blink-features=AutomationControlled; "
         f"got {launch_args!r}"
     )
 
-    context_kwargs = browser.new_context.call_args.kwargs
-    user_agent = context_kwargs.get("user_agent") or ""
+    user_agent = launch_kwargs.get("user_agent") or ""
     assert user_agent, (
-        "new_context must set a desktop Chrome user_agent; "
+        "persistent Chrome must set a desktop Chrome user_agent; "
         "Cloudflare treats the default HeadlessChrome fingerprint as a bot"
     )
     assert "HeadlessChrome" not in user_agent
@@ -160,25 +163,20 @@ def _cloudflare_challenge_page() -> tuple[MagicMock, list[int]]:
 
 
 def test_human_check_page_waits_for_log_in_and_names_the_challenge():
-    """If Beatport stays on Just a moment, login waits NAV_TIMEOUT_MS and names the human check."""
+    """If Beatport stays on Just a moment, homepage wait uses NAV_TIMEOUT_MS and names the human check."""
     page, homepage_timeouts = _cloudflare_challenge_page()
     logged: list[str] = []
 
     def capture_log(msg: object, *args: object, **_kwargs: object) -> None:
         logged.append(msg % args if args else str(msg))
 
-    env = {
-        "BEATPORT_EMAIL": "dj@example.com",
-        "BEATPORT_PASSWORD": "secret",
-    }
     with (
-        patch.dict(os.environ, env, clear=False),
         patch.object(cart_builder.time, "sleep"),
         patch.object(cart_builder.logger, "error", side_effect=capture_log),
         patch.object(cart_builder.logger, "warning", side_effect=capture_log),
     ):
         try:
-            cart_builder._beatport_login(page)
+            cart_builder._open_beatport_homepage(page)
         except Exception as exc:
             logged.append(str(exc))
 
@@ -226,10 +224,7 @@ def test_cart_bp_loads_beatport_homepage_only_once():
         patch.dict(os.environ, env, clear=False),
         patch.object(cart_builder.time, "sleep"),
     ):
-        try:
-            cart_builder._ensure_logged_in(page, "beatport")
-        except RuntimeError:
-            pass
+        cart_builder._ensure_logged_in(page, "beatport")
 
     goto_urls = [str(call.args[0]) for call in page.goto.call_args_list if call.args]
     homepage_loads = [
@@ -238,6 +233,54 @@ def test_cart_bp_loads_beatport_homepage_only_once():
     assert len(homepage_loads) == 1, (
         "loading www.beatport.com twice restarts the Cloudflare human check; "
         f"got gotos {goto_urls!r}"
+    )
+
+
+def test_cart_bp_waits_for_you_to_log_in_and_does_not_type_a_password():
+    """Cart BP must not click Log In or fill .env credentials; it waits for the avatar."""
+    page = MagicMock()
+    page.title.return_value = "Beatport | DJ & Electronic Dance Music"
+    page.content.return_value = "Log In"
+    fills: list[str] = []
+    login_clicks: list[str] = []
+    avatar_wait_timeouts: list[int] = []
+
+    def make_locator(selector: str = "") -> MagicMock:
+        loc = MagicMock()
+        loc.first = loc
+        text = str(selector)
+        is_login = "Log In" in text or text == BP_LOGIN_TRIGGER
+        is_avatar = "account_avatar" in text or text == BP_LOGGED_IN_INDICATOR
+        loc.is_visible.return_value = is_login and not is_avatar
+
+        def wait_for(state: str | None = None, timeout: int | None = None, **_kwargs: object) -> None:
+            if is_avatar and timeout is not None:
+                avatar_wait_timeouts.append(timeout)
+
+        def click(timeout: int | None = None, **_kwargs: object) -> None:
+            if is_login:
+                login_clicks.append(text)
+
+        def fill(value: str, **_kwargs: object) -> None:
+            fills.append(value)
+
+        loc.wait_for.side_effect = wait_for
+        loc.click.side_effect = click
+        loc.fill.side_effect = fill
+        loc.or_.side_effect = lambda _other: make_locator("Log In or avatar")
+        return loc
+
+    page.locator.side_effect = lambda selector, **_kw: make_locator(selector)
+    page.wait_for_function.return_value = None
+
+    with patch.object(cart_builder.time, "sleep"):
+        cart_builder._ensure_logged_in(page, "beatport")
+
+    assert fills == [], f"must not type credentials; got fills {fills!r}"
+    assert login_clicks == [], f"must not click Log In; got {login_clicks!r}"
+    assert any(timeout >= MANUAL_LOGIN_TIMEOUT_MS for timeout in avatar_wait_timeouts), (
+        "must wait MANUAL_LOGIN_TIMEOUT_MS for you to log in; "
+        f"got avatar waits {avatar_wait_timeouts!r}"
     )
 
 

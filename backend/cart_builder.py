@@ -1,11 +1,11 @@
 """Playwright-based cart builder for Beatport and Traxsource.
 
-Launches a headed Chromium browser, logs in, iterates approved tracks,
-selects WAV format, and adds each to the cart.  Failures are marked
-``cart_failed`` without crashing the batch.
+Launches headed Google Chrome with a dedicated profile, waits for you to
+log in (Beatport), then adds approved WAV tracks to the cart. Failures are
+marked ``cart_failed`` without crashing the batch.
 
-Session cookies are persisted to ``browser_state.json`` so repeated runs
-don't require re-login.
+The Chrome profile lives in ``chrome_profile/`` so Cloudflare clearance and
+login cookies survive across Cart BP clicks.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any, Literal
 
 from playwright.sync_api import (
-    Browser,
     BrowserContext,
     Page,
     Playwright,
@@ -32,12 +31,8 @@ from ws_manager import manager
 
 from store_selectors import (
     BEATPORT_BASE_URL,
-    BEATPORT_AUTH_URL,
     BEATPORT_CART_URL,
     BP_LOGIN_TRIGGER,
-    BP_EMAIL_INPUT,
-    BP_PASSWORD_INPUT,
-    BP_LOGIN_SUBMIT,
     BP_LOGGED_IN_INDICATOR,
     BP_FORMAT_DROPDOWN,
     BP_WAV_OPTION,
@@ -57,11 +52,15 @@ from store_selectors import (
     ACTION_DELAY_SEC,
     LOGIN_WAIT_SEC,
     PAGE_LOAD_WAIT_SEC,
+    MANUAL_LOGIN_TIMEOUT_MS,
 )
 
 logger = logging.getLogger(__name__)
 
-BROWSER_STATE_PATH = Path(__file__).parent / "browser_state.json"
+CHROME_PROFILE_DIR = Path(__file__).parent / "chrome_profile"
+_HIDE_WEBDRIVER = (
+    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+)
 
 Store = Literal["beatport", "traxsource"]
 
@@ -115,11 +114,6 @@ def _dismiss_cookie_banner(page: Page, selector: str) -> None:
 # Beatport automation
 # ---------------------------------------------------------------------------
 
-def _page_url(page: Page) -> str:
-    url = getattr(page, "url", "") or ""
-    return url if isinstance(url, str) else ""
-
-
 def _cloudflare_blocking(page: Page) -> bool:
     try:
         title = (page.title() or "").lower()
@@ -145,7 +139,7 @@ def _raise_cloudflare_block(page: Page) -> None:
 
 
 def _wait_until_cloudflare_clears(page: Page) -> None:
-    """Do not click Log In (or cookies) while the human-check overlay is still up."""
+    """Do not click anything while the human-check overlay is still up."""
     if not _cloudflare_blocking(page):
         return
     try:
@@ -192,86 +186,25 @@ def _beatport_avatar_visible(page: Page) -> bool:
         return False
 
 
-def _already_on_beatport_home(page: Page) -> bool:
-    if not _page_url(page).startswith(BEATPORT_BASE_URL):
-        return False
-    try:
-        login_or_avatar = page.locator(BP_LOGIN_TRIGGER).first.or_(
-            page.locator(BP_LOGGED_IN_INDICATOR).first,
-        )
-        return login_or_avatar.is_visible(timeout=1_000)
-    except PlaywrightTimeout:
-        return False
-
-
-def _beatport_submit_credentials(page: Page, username: str, password: str) -> bool:
-    """Click Log In on the current homepage and complete the OAuth form. No extra goto."""
-    try:
-        page.locator(BP_LOGIN_TRIGGER).first.click(timeout=5_000)
-    except PlaywrightTimeout:
-        logger.error("Login trigger not found on Beatport homepage")
-        return False
-
-    try:
-        page.wait_for_url(f"{BEATPORT_AUTH_URL}/**", timeout=NAV_TIMEOUT_MS)
-    except PlaywrightTimeout:
-        if _cloudflare_blocking(page):
-            _raise_cloudflare_block(page)
-        logger.error("Did not redirect to account.beatport.com")
-        return False
-
-    time.sleep(PAGE_LOAD_WAIT_SEC)
-    _wait_until_cloudflare_clears(page)
-
-    try:
-        page.locator(BP_EMAIL_INPUT).first.wait_for(state="visible", timeout=NAV_TIMEOUT_MS)
-    except PlaywrightTimeout:
-        if _cloudflare_blocking(page):
-            _raise_cloudflare_block(page)
-        logger.error("Did not redirect to account.beatport.com")
-        return False
-
-    page.locator(BP_EMAIL_INPUT).first.fill(username)
-    page.locator(BP_PASSWORD_INPUT).first.fill(password)
-    page.locator(BP_LOGIN_SUBMIT).first.click()
-
-    try:
-        page.wait_for_url(f"{BEATPORT_BASE_URL}/**", timeout=NAV_TIMEOUT_MS)
-    except PlaywrightTimeout:
-        logger.warning("Did not redirect back to Beatport after login")
-        return False
-
-    time.sleep(PAGE_LOAD_WAIT_SEC)
-    _wait_for_beatport_homepage(page)
-    _dismiss_cookie_banner(page, BP_COOKIE_ACCEPT)
-
+def _wait_for_you_to_log_in_to_beatport(page: Page) -> None:
+    """Do not type credentials. Wait until the avatar appears in the Chrome window."""
     if _beatport_avatar_visible(page):
-        logger.info("Beatport login successful")
-        return True
-
-    logger.warning("Beatport login may have failed — indicator not found")
-    return False
-
-
-def _beatport_login(page: Page) -> bool:
-    """Log in to Beatport via homepage modal → OAuth redirect → account.beatport.com."""
-    username = os.environ.get("BEATPORT_EMAIL", "")
-    password = os.environ.get("BEATPORT_PASSWORD", "")
-    if not username or not password:
-        logger.error("BEATPORT_EMAIL / BEATPORT_PASSWORD not set in .env")
-        return False
-
-    if not _already_on_beatport_home(page):
-        _open_beatport_homepage(page)
-        if _beatport_avatar_visible(page):
-            return True
-
-    return _beatport_submit_credentials(page, username, password)
-
-
-def _beatport_is_logged_in(page: Page) -> bool:
-    """True when the current page already shows a logged-in Beatport avatar."""
-    return _beatport_avatar_visible(page)
+        logger.info("Beatport session already logged in")
+        return
+    logger.info(
+        "Waiting up to %ss for you to log in to Beatport in the Chrome window",
+        MANUAL_LOGIN_TIMEOUT_MS // 1000,
+    )
+    try:
+        page.locator(BP_LOGGED_IN_INDICATOR).first.wait_for(
+            state="visible",
+            timeout=MANUAL_LOGIN_TIMEOUT_MS,
+        )
+    except PlaywrightTimeout:
+        raise RuntimeError(
+            "Timed out waiting for you to log in to Beatport in the Chrome window."
+        ) from None
+    logger.info("Beatport login detected")
 
 
 def _beatport_add_track(page: Page, track: dict[str, Any]) -> bool:
@@ -446,10 +379,6 @@ def build_cart(store: Store) -> dict[str, Any]:
                         "total": len(eligible),
                     })
 
-                # Save session cookies for next run
-                context.storage_state(path=str(BROWSER_STATE_PATH))
-                logger.info("Browser state saved to %s", BROWSER_STATE_PATH)
-
                 _broadcast("cart_complete", {
                     "store": store,
                     "total": summary["total"],
@@ -480,43 +409,37 @@ def build_cart(store: Store) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _launch_browser(pw: Playwright, store: Store) -> tuple[BrowserContext, Page]:
-    """Launch headed Chromium, restoring session cookies if available."""
-    browser: Browser = pw.chromium.launch(
-        headless=False,
-        args=["--disable-blink-features=AutomationControlled"],
-    )
-
-    storage = str(BROWSER_STATE_PATH) if BROWSER_STATE_PATH.exists() else None
-    context = browser.new_context(
-        storage_state=storage,
-        viewport={"width": 1280, "height": 900},
-        user_agent=_DESKTOP_CHROME_UA,
-    )
-    # Hide navigator.webdriver so Cloudflare does not treat Chromium as automation.
-    context.add_init_script(
-        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-    )
+    """Launch headed Google Chrome with a dedicated profile (not daily Chrome)."""
+    CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        context = pw.chromium.launch_persistent_context(
+            str(CHROME_PROFILE_DIR),
+            channel="chrome",
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled"],
+            viewport={"width": 1280, "height": 900},
+            user_agent=_DESKTOP_CHROME_UA,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Cart BP needs Google Chrome installed. Playwright's bundled "
+            "Chromium keeps hitting Cloudflare's human check."
+        ) from exc
+    context.add_init_script(_HIDE_WEBDRIVER)
     context.set_default_timeout(NAV_TIMEOUT_MS)
-    page = context.new_page()
+    page = context.pages[0] if context.pages else context.new_page()
     return context, page
 
 
 def _ensure_logged_in(page: Page, store: Store) -> None:
-    """Check session validity; log in if needed."""
+    """Check session validity; for Beatport, wait for you to log in in Chrome."""
     if store == "beatport":
         _open_beatport_homepage(page)
-        if _beatport_avatar_visible(page):
-            return
-        username = os.environ.get("BEATPORT_EMAIL", "")
-        password = os.environ.get("BEATPORT_PASSWORD", "")
-        if not username or not password:
-            raise RuntimeError("BEATPORT_EMAIL / BEATPORT_PASSWORD not set in .env")
-        if not _beatport_submit_credentials(page, username, password):
-            raise RuntimeError("Failed to log in to Beatport")
-    else:
-        if not _traxsource_is_logged_in(page):
-            if not _traxsource_login(page):
-                raise RuntimeError("Failed to log in to Traxsource")
+        _wait_for_you_to_log_in_to_beatport(page)
+        return
+    if not _traxsource_is_logged_in(page):
+        if not _traxsource_login(page):
+            raise RuntimeError("Failed to log in to Traxsource")
 
 
 def _add_track_to_cart(page: Page, track: dict[str, Any], store: Store) -> bool:

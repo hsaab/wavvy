@@ -105,3 +105,5 @@ NAV_TIMEOUT_MS = 30_000
 ACTION_DELAY_SEC = 1.5
 LOGIN_WAIT_SEC = 3.0
 PAGE_LOAD_WAIT_SEC = 2.0
+# Time for you to pass Cloudflare and log in in the Chrome window.
+MANUAL_LOGIN_TIMEOUT_MS = 300_000

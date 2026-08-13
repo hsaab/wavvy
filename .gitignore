@@ -18,6 +18,7 @@ venv/
 
 # Playwright
 browser_state.json
+backend/chrome_profile/
 
 # Node
 node_modules/

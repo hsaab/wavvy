@@ -46,7 +46,11 @@ export default function CartProgressBanner({ cartState }) {
         <div className="flex items-center gap-2 min-w-0">
           <Spinner className={colors.text} />
           <span className={`${colors.text} text-sm font-medium shrink-0`}>
-            {phase === "logging_in" ? `Logging in to ${storeLabel}…` : `Adding to ${storeLabel} cart`}
+            {phase === "logging_in" && store === "beatport"
+              ? "Log in to Beatport in the Chrome window"
+              : phase === "logging_in"
+                ? `Logging in to ${storeLabel}…`
+                : `Adding to ${storeLabel} cart`}
           </span>
           {phase === "adding" && track && (
             <span className="text-gray-400 text-xs truncate">{track}</span>
