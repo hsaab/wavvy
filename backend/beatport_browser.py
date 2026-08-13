@@ -63,6 +63,8 @@ from playwright.async_api import (
     async_playwright,
 )
 
+from store_match import build_search_query, parse_store_query
+
 logger = logging.getLogger(__name__)
 
 SEARCH_URL_TEMPLATE = "https://www.beatport.com/search?q={query}"
@@ -110,6 +112,19 @@ class BeatportChallengeError(BeatportBrowserError):
     this loudly is intentional — a silent challenge previously made every
     search look like a no-results hit, so links never got resolved.
     """
+
+
+def _identity_query_text(
+    title: str | None,
+    artist: str | None,
+    query: str | None = None,
+) -> str:
+    """Identity search string. Two-arg callers still get title_core + remixer/artist."""
+    if query:
+        return query
+    if artist is None:
+        return title or ""
+    return build_search_query(parse_store_query(artist=artist, title=title or ""))
 
 
 def _is_cloudflare_challenge(page, html: str) -> bool:
@@ -210,8 +225,17 @@ class BeatportBrowser:
     # Search
     # ------------------------------------------------------------------
 
-    async def search(self, title: str, artist: str) -> str:
-        """Fetch Beatport's search page for ``artist title`` and return the HTML.
+    async def search(
+        self,
+        title: str | None = None,
+        artist: str | None = None,
+        *,
+        query: str | None = None,
+    ) -> str:
+        """Fetch Beatport's search page for the identity query and return HTML.
+
+        Prefer one identity string (positional or ``query=``). ``search(title,
+        artist)`` still works but URL-encodes that identity, not artist+title.
 
         Each call uses a fresh ``BrowserContext`` to avoid Cloudflare's
         per-context bot scoring; see the module docstring for details.
@@ -230,8 +254,9 @@ class BeatportBrowser:
         with a ``search-all`` query key.
         """
         context = await self._new_context()
-        query = quote_plus(f"{artist} {title}".strip())
-        url = SEARCH_URL_TEMPLATE.format(query=query)
+        url = SEARCH_URL_TEMPLATE.format(
+            query=quote_plus(_identity_query_text(title, artist, query)),
+        )
 
         try:
             page = await context.new_page()

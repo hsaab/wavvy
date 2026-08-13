@@ -24,7 +24,14 @@ from bs4 import BeautifulSoup
 
 from beatport_browser import BeatportBrowser, BeatportBrowserError
 from database import get_supabase, update_track_fields
-from store_match import StoreHit, StoreQuery, parse_store_hit, parse_store_query, score_hit
+from store_match import (
+    StoreHit,
+    StoreQuery,
+    build_search_query,
+    parse_store_hit,
+    parse_store_query,
+    score_hit,
+)
 from traxsource_browser import TraxsourceBrowser, TraxsourceBrowserError
 from ws_manager import manager
 
@@ -84,6 +91,11 @@ def _classify_confidence(score: int) -> str:
 def _store_query(title: str, artist: str) -> StoreQuery:
     """Parse source identity once per search page."""
     return parse_store_query(artist=artist, title=title)
+
+
+def _identity_search_query(title: str, artist: str) -> str:
+    """One store search string: title core plus first remixer or first artist."""
+    return build_search_query(_store_query(title, artist))
 
 
 def _score_store_row(query: StoreQuery, title: str, artist: str, url: str) -> int:
@@ -418,7 +430,7 @@ async def _beatport_search(
     title: str,
     artist: str,
 ) -> tuple[str | None, int]:
-    """Search Beatport for *artist — title*. Returns (url, fuzzy_score).
+    """Search Beatport with one identity query. Returns (url, fuzzy_score).
 
     Fetches the search page through a real Chromium session (``bp_browser``)
     because Beatport sits behind Cloudflare's JS challenge. Callers must
@@ -431,7 +443,7 @@ async def _beatport_search(
     cannot reach the page; the caller should treat that as a batch-level
     failure and avoid retrying for the rest of the batch.
     """
-    html = await bp_browser.search(title, artist)
+    html = await bp_browser.search(_identity_search_query(title, artist))
 
     bp_url, score = _parse_beatport_next_data(html, title, artist)
     if not bp_url:
@@ -540,7 +552,7 @@ async def _traxsource_search(
     title: str,
     artist: str,
 ) -> tuple[str | None, int]:
-    """Search Traxsource for *artist — title*. Returns (url, fuzzy_score).
+    """Search Traxsource with one identity query. Returns (url, fuzzy_score).
 
     Fetches the search page through a real Chromium session (``ts_browser``)
     because Traxsource now sits behind Cloudflare's JS challenge — plain
@@ -551,7 +563,7 @@ async def _traxsource_search(
     reporting ``not_found``. Raises :class:`TraxsourceBrowserError` on a
     browser/session failure; the caller decides how to handle it.
     """
-    html = await ts_browser.search(title, artist)
+    html = await ts_browser.search(_identity_search_query(title, artist))
 
     ts_url, score = _parse_traxsource_html(
         html, parse_store_query(artist=artist, title=title),
