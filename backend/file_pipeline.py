@@ -441,6 +441,8 @@ class FilePipeline:
             raise RuntimeError(f"External drive not mounted at {dest_dir}")
 
         dest = dest_dir / src.name
+        if src.resolve() == dest.resolve():
+            return dest
         if dest.exists():
             stem = src.stem
             suffix = src.suffix
@@ -525,6 +527,7 @@ class FilePipeline:
             raise ValueError(f"Track {track_id} not found after status update")
         track = refreshed.data[0]
 
+        dest: Path | None = None
         try:
             dest = self._move_to_drive(path, track)
             self._import_to_itunes(dest, track)
@@ -554,7 +557,9 @@ class FilePipeline:
         except Exception as exc:
             logger.error("process_track failed for %s: %s", track_id, exc)
             restore = raw_path
-            if path.exists():
+            if dest is not None and dest.exists():
+                restore = str(dest.resolve())
+            elif path.exists():
                 restore = str(path.resolve())
             update_track_status(track_id, "downloaded", {"download_path": restore})
             self._broadcast("file_error", {

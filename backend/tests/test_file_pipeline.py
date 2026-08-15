@@ -72,3 +72,93 @@ def test_import_raises_when_music_is_not_running_instead_of_marking_done(
         )
 
     add.assert_not_called()
+
+
+def test_process_track_keeps_drive_path_when_music_is_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A Music-closed failure after the move must still point at the WAV on the drive."""
+    downloads = tmp_path / "Downloads"
+    drive = tmp_path / "Drive"
+    downloads.mkdir()
+    drive.mkdir()
+    wav = downloads / "Artist - Track.wav"
+    wav.write_bytes(b"RIFF")
+
+    track: dict = {
+        "id": 42,
+        "status": "downloaded",
+        "download_path": str(wav),
+        "track_name": "Track",
+        "artist_name": "Artist",
+        "source_playlist": "latin tech house",
+        "target_playlists": ["S - Latin/Tribal House"],
+        "genre": "House",
+    }
+    status_updates: list[tuple] = []
+
+    def fake_update(track_id: int, status: str, extra: dict | None = None) -> None:
+        status_updates.append((track_id, status, extra))
+        if extra:
+            track.update(extra)
+        track["status"] = status
+
+    class _Result:
+        def __init__(self, data: list) -> None:
+            self.data = data
+
+    class _Query:
+        def select(self, *_args: object, **_kwargs: object) -> "_Query":
+            return self
+
+        def eq(self, *_args: object, **_kwargs: object) -> "_Query":
+            return self
+
+        def execute(self) -> _Result:
+            return _Result([dict(track)])
+
+    class _Client:
+        def table(self, _name: str) -> _Query:
+            return _Query()
+
+    monkeypatch.setattr("database.get_supabase", lambda: _Client())
+    monkeypatch.setattr("file_pipeline.update_track_status", fake_update)
+    monkeypatch.setattr(
+        "file_pipeline.get_config",
+        lambda: {"external_drive_path": str(drive)},
+    )
+    monkeypatch.setattr(
+        "file_pipeline.playlists_for_import",
+        lambda _track: ["S - Latin/Tribal House"],
+    )
+    monkeypatch.setattr("file_pipeline.is_music_app_running", lambda: False)
+    monkeypatch.setattr("file_pipeline.notify_file_processed", lambda *_a, **_k: None)
+    monkeypatch.setattr("file_pipeline.library_cache.add_entry", lambda **_k: None)
+    add = MagicMock()
+    monkeypatch.setattr("file_pipeline.add_to_multiple_playlists", add)
+
+    pipeline = FilePipeline()
+    with pytest.raises(RuntimeError, match="Apple Music is not running"):
+        pipeline.process_track(42)
+
+    dest = drive / wav.name
+    assert dest.exists()
+    assert not wav.exists()
+    assert status_updates[-1] == (
+        42,
+        "downloaded",
+        {"download_path": str(dest.resolve())},
+    )
+    add.assert_not_called()
+
+    monkeypatch.setattr("file_pipeline.is_music_app_running", lambda: True)
+    result = pipeline.process_track(42)
+
+    assert result == {"ok": True, "destination": str(dest)}
+    assert dest.exists()
+    assert not (drive / f"{wav.stem} (1){wav.suffix}").exists()
+    add.assert_called_once()
+    assert add.call_args[0][0] == dest
+    assert add.call_args[0][1] == ["S - Latin/Tribal House"]
+    assert status_updates[-1][1] == "done"
