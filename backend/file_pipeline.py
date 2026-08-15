@@ -31,6 +31,7 @@ from watchdog.observers import Observer
 from config import get_config
 from database import get_tracks_by_status, update_track_status
 from itunes_bridge import add_to_multiple_playlists, is_music_app_running
+from playlist_targets import playlists_for_import
 from itunes_scanner import library_cache
 from notifications import notify_file_processed, notify_file_unmatched, notify_drive_unmounted
 from ws_manager import manager
@@ -460,10 +461,11 @@ class FilePipeline:
     def _import_to_itunes(file_path: Path, track: dict[str, Any]) -> None:
         """Add the file to Apple Music library and all target playlists."""
         if not is_music_app_running():
-            logger.warning("Music app not running — skipping iTunes import for %s", file_path.name)
-            return
+            raise RuntimeError(
+                f"Apple Music is not running — cannot add {file_path.name} to the set playlist",
+            )
 
-        target_playlists: list[str] = track.get("target_playlists") or []
+        target_playlists = playlists_for_import(track)
 
         if not target_playlists:
             # Fall back to genre-based mapping for backward compatibility
@@ -529,7 +531,11 @@ class FilePipeline:
             update_track_status(
                 track_id,
                 "done",
-                {"file_path": str(dest), "download_path": None},
+                {
+                    "file_path": str(dest),
+                    "download_path": None,
+                    "target_playlists": playlists_for_import(track),
+                },
             )
             self.files_processed += 1
             self._broadcast("file_complete", {

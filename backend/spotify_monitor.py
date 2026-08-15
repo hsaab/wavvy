@@ -27,6 +27,7 @@ from database import (
 )
 from itunes_scanner import library_cache
 from notifications import notify_scan_complete
+from playlist_targets import itunes_set_playlist
 from ws_manager import manager
 
 logger = logging.getLogger(__name__)
@@ -289,15 +290,16 @@ async def scan_playlist(playlist_id: str, playlist_name: str) -> dict[str, Any]:
             continue
 
         try:
-            await asyncio.to_thread(
-                upsert_track,
-                {
-                    **track_data,
-                    "status": "new",
-                    "source_playlist": playlist_name,
-                    "genre": genre,
-                },
-            )
+            row: dict[str, Any] = {
+                **track_data,
+                "status": "new",
+                "source_playlist": playlist_name,
+                "genre": genre,
+            }
+            set_playlist = itunes_set_playlist(playlist_name)
+            if set_playlist:
+                row["target_playlists"] = [set_playlist]
+            await asyncio.to_thread(upsert_track, row)
             stats["new"] += 1
         except Exception as exc:
             stats["errors"] += 1

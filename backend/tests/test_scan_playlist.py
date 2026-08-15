@@ -181,6 +181,28 @@ def test_second_scan_of_the_same_playlist_with_no_new_spotify_tracks_inserts_not
     ]
 
 
+def test_scanned_latin_track_is_preassigned_to_the_latin_set_playlist(
+    harness: _ScanHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new latin tech house row starts with S - Latin/Tribal House already selected."""
+    monkeypatch.setattr(
+        "playlist_targets.get_config",
+        lambda: {
+            "source_playlist_mapping": {
+                "latin tech house": "S - Latin/Tribal House",
+            },
+        },
+    )
+    harness.tracks = [_track("sp_ledher", "Tu y Yo", artist="Sebastian Ledher")]
+
+    harness.run(playlist_name="latin tech house")
+
+    row = harness.upsert_for("sp_ledher")
+    assert row["status"] == "new"
+    assert row["target_playlists"] == ["S - Latin/Tribal House"]
+
+
 def test_later_scan_inserts_a_brand_new_spotify_track_as_new(
     harness: _ScanHarness,
 ) -> None:
