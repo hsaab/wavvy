@@ -28,6 +28,13 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "Worldtech": "Worldtech Latin Afro",
         "Tech House": "Tech House",
     },
+    "source_playlist_mapping": {
+        "downtempo trance": "S - Downtempo Trance",
+        "latin tech house": "S - Latin/Tribal House",
+        "hauz": "S - Tech House",
+        "Progressive": "S - Progressive House",
+        "disco disco": "S - Disco Tech",
+    },
     "poll_interval_minutes": 30,
     "file_watch_enabled": True,
 }
