@@ -9,8 +9,11 @@ Install the runner (from backend/):
 
 from __future__ import annotations
 
+import inspect
+
 from store_match import (
     StoreHit,
+    StoreQuery,
     build_search_query,
     parse_store_hit,
     parse_store_query,
@@ -57,6 +60,13 @@ def _best_url(artist: str, title: str, hits: list[StoreHit]) -> str | None:
     if best_score < ACCEPT_FLOOR:
         return None
     return best_url
+
+
+def _score(query: StoreQuery, hit: StoreHit, isrc: str | None = None) -> int:
+    """Score a hit, passing Spotify isrc when score_hit accepts that argument."""
+    if isrc is not None and "isrc" in inspect.signature(score_hit).parameters:
+        return score_hit(query, hit, isrc=isrc)
+    return score_hit(query, hit)
 
 
 def test_traxsource_bob_fossil_remix_link_is_kept_instead_of_rejected_at_score_49() -> None:
@@ -240,3 +250,16 @@ def test_passing_mix_name_and_isrc_does_not_change_the_kigelia_score() -> None:
 
     assert score_hit(query, with_fields) == score_hit(query, plain)
     assert score_hit(query, with_fields) >= ACCEPT_FLOOR
+
+
+def test_spotify_isrc_matching_a_beatport_hit_is_accepted_at_100_even_if_titles_differ_slightly() -> None:
+    """Matching ISRCs (trim, case-insensitive) accept at 100 before fuzzy title."""
+    query = _query("Holed Coin", "Echo")
+    hit = parse_store_hit(
+        title="Echoes",
+        artist="Holed Coin",
+        url=BEATPORT_ECHO_ORIGINAL,
+        isrc="  gb-echo-00-00001  ",
+    )
+
+    assert _score(query, hit, isrc="GB-ECHO-00-00001") == 100
