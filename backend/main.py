@@ -448,6 +448,10 @@ async def library_scan():
         return {"ok": False, "message": "Scan already in progress"}
     count = await asyncio.to_thread(library_cache.scan)
     skipped = mark_owned_queue_tracks_skipped(library_cache)
+    await manager.broadcast("library_scan_complete", {
+        "track_count": count,
+        "skipped": skipped,
+    })
     return {"ok": True, "track_count": count, "skipped": skipped}
 
 

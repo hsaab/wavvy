@@ -156,7 +156,13 @@ def test_refresh_library_and_app_startup_both_run_the_sweep_after_the_cache_is_f
         return 1
 
     monkeypatch.setattr(fresh, "scan", fake_scan)
+    broadcasts: list[tuple[str, object]] = []
+
+    async def fake_broadcast(event_type: str, payload: object = None) -> None:
+        broadcasts.append((event_type, payload))
+
     monkeypatch.setattr("main.mark_owned_queue_tracks_skipped", fake_sweep, raising=False)
+    monkeypatch.setattr("main.manager.broadcast", fake_broadcast)
     monkeypatch.setattr("main.pipeline.start", lambda: None)
     monkeypatch.setattr("main.pipeline.stop", lambda: None)
     monkeypatch.setattr("main.init_supabase", lambda: None)
@@ -166,6 +172,9 @@ def test_refresh_library_and_app_startup_both_run_the_sweep_after_the_cache_is_f
 
     assert events == ["cache_filled", "sweep"]
     assert refresh == {"ok": True, "track_count": 1, "skipped": 1}
+    assert broadcasts == [
+        ("library_scan_complete", {"track_count": 1, "skipped": 1}),
+    ]
 
     events.clear()
 
