@@ -1,9 +1,10 @@
-"""Library dump journeys: a comma inside an artist still pairs the track.
+"""Library dump and lookup journeys: pairing, plus filename-style empty-artist matches.
 
 These tests never hit AppleScript or the network. They call ITunesLibraryCache.scan
 with Music-running patched. Most dumps patch run_applescript on itunes_scanner.
 The trailing-empty and count-mismatch journeys mock subprocess.run instead so
-scan goes through the real run_applescript strip.
+scan goes through the real run_applescript strip. Filename-style lookups use
+add_entry so they never go through a dump.
 
 Install the runner (from backend/). System Python may be PEP 668 managed, so use a venv:
     python3 -m venv ../.venv
@@ -136,3 +137,30 @@ def test_library_dump_with_unequal_name_and_artist_counts_does_not_build_a_crook
     assert not cache.contains_fuzzy("Dazed, Nelav", "A Solas")
     assert not cache.contains_fuzzy("DJ Example", "Midnight Sun")
     assert not cache.contains_fuzzy("Dazed, Nelav", "Other Cut")
+
+
+def test_contains_fuzzy_hits_fancy_vip_when_library_row_is_empty_artist_and_filename_style_name(
+    cache: ITunesLibraryCache,
+) -> None:
+    """A Music row stored as Title - Artist with no artist field still matches Fancy (VIP)."""
+    cache.add_entry("", "Fancy (VIP) [Extended] - Dazed, Daveartt, Tamma, Dabo")
+
+    assert cache.contains_fuzzy("Dazed, Daveartt, Tamma, Dabo", "Fancy (VIP)")
+
+
+def test_a_solas_by_dazed_nelav_is_not_a_hit_against_asi_dazed_youtube(
+    cache: ITunesLibraryCache,
+) -> None:
+    """A Solas is not treated as owned just because Así - Dazed (youtube) is in Music."""
+    cache.add_entry("", "Así - Dazed (youtube)")
+
+    assert not cache.contains_fuzzy("Dazed, Nelav", "A Solas")
+
+
+def test_let_yourself_go_is_not_a_hit_against_a_short_library_name_like_lets_go(
+    cache: ITunesLibraryCache,
+) -> None:
+    """Let Yourself Go is not treated as owned just because Music has LET'S GO."""
+    cache.add_entry("", "LET'S GO")
+
+    assert not cache.contains_fuzzy("House Crew", "Let Yourself Go")

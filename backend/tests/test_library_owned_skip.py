@@ -210,3 +210,41 @@ def test_already_skipped_and_non_buy_queue_tracks_are_not_rewritten(
     assert set(harness.updated_ids()) == {31, 32}
     assert all(status == "skipped" for _track_id, status in harness.status_updates)
     assert skipped == 2
+
+
+def test_buy_queue_fancy_vip_is_skipped_when_library_stored_it_as_empty_artist_filename(
+    harness: _OwnedSkipHarness,
+    cache: ITunesLibraryCache,
+) -> None:
+    """An approved Fancy (VIP) is skipped when Music only has the filename-style empty-artist row."""
+    from main import mark_owned_queue_tracks_skipped
+
+    cache.add_entry("", "Fancy (VIP) [Extended] - Dazed, Daveartt, Tamma, Dabo")
+    harness.tracks = [
+        _track(41, "Fancy (VIP)", "Dazed, Daveartt, Tamma, Dabo", "approved"),
+    ]
+
+    skipped = mark_owned_queue_tracks_skipped(cache)
+
+    assert harness.status_of(41) == "skipped"
+    assert harness.status_updates == [(41, "skipped")]
+    assert skipped == 1
+
+
+def test_buy_queue_a_solas_stays_approved_when_library_only_has_asi_dazed_youtube(
+    harness: _OwnedSkipHarness,
+    cache: ITunesLibraryCache,
+) -> None:
+    """A Solas by Dazed, Nelav stays approved when Music only has Así - Dazed (youtube)."""
+    from main import mark_owned_queue_tracks_skipped
+
+    cache.add_entry("", "Así - Dazed (youtube)")
+    harness.tracks = [
+        _track(42, "A Solas", "Dazed, Nelav", "approved"),
+    ]
+
+    skipped = mark_owned_queue_tracks_skipped(cache)
+
+    assert harness.status_of(42) == "approved"
+    assert harness.status_updates == []
+    assert skipped == 0
