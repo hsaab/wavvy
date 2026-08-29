@@ -172,4 +172,42 @@ class ITunesLibraryCache:
         }
 
 
+# Auto-skip only untouched inbox and in-flight cart rows. approved is left
+# out so Approve and Unskip (which writes approved) survive the next scan.
+BUY_QUEUE_STATUSES = [
+    "new",
+    "carted",
+    "cart_failed",
+]
+
+
+def mark_owned_queue_tracks_skipped(cache: ITunesLibraryCache) -> int:
+    """Set buy-queue rows that already exist in the Music library to skipped."""
+    from database import get_tracks_by_statuses, update_tracks_status
+
+    tracks = get_tracks_by_statuses(BUY_QUEUE_STATUSES)
+    owned_ids = [
+        track["id"]
+        for track in tracks
+        if cache.contains_fuzzy(track.get("artist_name") or "", track.get("track_name") or "")
+    ]
+    if owned_ids:
+        update_tracks_status(owned_ids, "skipped")
+    return len(owned_ids)
+
+
+def refresh_library_and_skip_owned() -> dict:
+    """Scan Music, then skip owned buy-queue rows only if the scan succeeded."""
+    count = library_cache.scan()
+    if library_cache.scan_error is not None:
+        return {
+            "ok": False,
+            "track_count": count,
+            "skipped": 0,
+            "scan_error": library_cache.scan_error,
+        }
+    skipped = mark_owned_queue_tracks_skipped(library_cache)
+    return {"ok": True, "track_count": count, "skipped": skipped}
+
+
 library_cache = ITunesLibraryCache()

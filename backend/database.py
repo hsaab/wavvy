@@ -160,6 +160,25 @@ def update_track_fields(track_id: int, fields: dict[str, Any]) -> dict[str, Any]
     return result.data[0] if result.data else {}
 
 
+def update_tracks_status(track_ids: list[int], status: str) -> int:
+    """Set the same status on many tracks. Returns how many rows came back."""
+    if not track_ids:
+        return 0
+    updated = 0
+    chunk_size = 200
+    for i in range(0, len(track_ids), chunk_size):
+        chunk = track_ids[i : i + chunk_size]
+        result = (
+            get_supabase()
+            .table("tracks")
+            .update({"status": status})
+            .in_("id", chunk)
+            .execute()
+        )
+        updated += len(result.data)
+    return updated
+
+
 def get_all_tracks(
     order_by: str = "date_detected",
     ascending: bool = False,

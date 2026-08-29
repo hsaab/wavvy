@@ -40,12 +40,6 @@ export default function App() {
   const [toasts, setToasts] = useState([]);
   const [refreshingLibrary, setRefreshingLibrary] = useState(false);
   const { connected, lastMessage } = useWebSocket();
-  /* Latest event for TrackQueue: live WS messages, or a local library scan ping. */
-  const [queueWsMessage, setQueueWsMessage] = useState(null);
-
-  useEffect(() => {
-    if (lastMessage) setQueueWsMessage(lastMessage);
-  }, [lastMessage]);
 
   const addToast = useCallback((message, variant = "info") => {
     const id = Date.now() + Math.random();
@@ -116,12 +110,17 @@ export default function App() {
     setRefreshingLibrary(true);
     try {
       const result = await scanLibrary();
-      const skipped = result.skipped ?? 0;
+      if (!result.ok) {
+        addToast(
+          result.scan_error || result.message || "Library scan failed",
+          "error",
+        );
+        return;
+      }
       addToast(
-        `iTunes library refreshed: ${result.track_count} tracks, ${skipped} skipped`,
+        `iTunes library refreshed: ${result.track_count} tracks, ${result.skipped ?? 0} skipped`,
         "success",
       );
-      setQueueWsMessage({ type: "library_scan_complete" });
     } catch (err) {
       addToast(`Library scan failed: ${err.message}`, "error");
     } finally {
@@ -192,7 +191,7 @@ export default function App() {
 
       {/* Content — pb-20 leaves room for the fixed PlayerBar */}
       <main className="flex-1 p-6 pb-20 overflow-y-auto">
-        {activeTab === "queue" && <TrackQueue wsMessage={queueWsMessage} />}
+        {activeTab === "queue" && <TrackQueue wsMessage={lastMessage} />}
         {activeTab === "skipped" && <SkippedTracks wsMessage={lastMessage} />}
         {activeTab === "history" && <History wsMessage={lastMessage} />}
         {activeTab === "settings" && <Settings />}
