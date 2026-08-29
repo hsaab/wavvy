@@ -488,9 +488,8 @@ async def pipeline_status():
 
 @app.post("/api/pipeline/scan")
 async def pipeline_scan():
-    """Scan ~/Downloads for WAV files and enqueue them for processing."""
-    enqueued = await asyncio.to_thread(pipeline.scan_downloads)
-    return {"enqueued": enqueued, "count": len(enqueued)}
+    """Scan ~/Downloads for WAV/MP3 files and match them to queue tracks."""
+    return await asyncio.to_thread(pipeline.scan_downloads)
 
 
 @app.post("/api/pipeline/process")

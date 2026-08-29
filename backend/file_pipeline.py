@@ -1,12 +1,14 @@
-"""File pipeline — watches ~/Downloads for new WAV files and matches them.
+"""File pipeline — watches ~/Downloads for new audio files and matches them.
 
-Runs a Watchdog observer in a daemon thread. When a .wav lands in the
+Runs a Watchdog observer in a daemon thread. When a .wav or .mp3 lands in the
 downloads folder, the pipeline:
   1. Waits for a stable file size (download complete).
-  2. Fuzzy-matches the filename to ``carted`` / ``purchased`` tracks in Supabase.
+  2. Fuzzy-matches the filename to buy-queue tracks in Supabase.
   3. If matched: sets status ``downloaded`` with ``download_path`` and broadcasts
      ``file_downloaded`` so the user can adjust playlists before importing.
   4. If unmatched: broadcasts a WebSocket event for manual assignment.
+
+Files are moved as-is — never transcoded.
 
 Manual ``process_track`` / API ``POST /api/pipeline/process`` then moves the file
 to the external drive, imports to Apple Music, and marks ``done``.
@@ -16,20 +18,24 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import shutil
 import threading
 import time
-import unicodedata
 from pathlib import Path
 from typing import Any
 
-from thefuzz import fuzz
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
+from audio_match import (
+    AUDIO_EXTENSIONS,
+    OPEN_MATCH_STATUSES,
+    consume_track,
+    list_audio_files,
+    pick_track_for_file,
+)
 from config import get_config
-from database import get_tracks_by_status, update_track_status
+from database import get_tracks_by_status, get_tracks_by_statuses, update_track_status
 from itunes_bridge import add_to_multiple_playlists, is_music_app_running
 from playlist_targets import playlists_for_import
 from itunes_scanner import library_cache
@@ -40,96 +46,23 @@ logger = logging.getLogger(__name__)
 
 STABILITY_CHECKS = 3
 STABILITY_INTERVAL = 1.0  # seconds between size checks
+SCAN_STABLE_INTERVAL = 0.25  # one extra size sample; not the full watchdog wait
 DEBOUNCE_COOLDOWN = 10.0  # seconds to ignore duplicate events for the same file
 TEMP_EXTENSIONS = {".crdownload", ".part", ".tmp", ".download", ".partial"}
 
 
-def _strip_diacritics(text: str) -> str:
-    """Remove accent marks / diacritics (e.g. ï → i, é → e)."""
-    nfkd = unicodedata.normalize("NFKD", text)
-    return "".join(c for c in nfkd if not unicodedata.combining(c))
+def _empty_scan(*, folder_missing: bool = False) -> dict[str, Any]:
+    return {
+        "count": 0,
+        "matched": [],
+        "unmatched": [],
+        "files": [],
+        "folder_missing": folder_missing,
+    }
 
 
-# Suffixes that stores append after " - " and add no matching value
-_MIX_SUFFIX_RE = re.compile(
-    r"\s*-\s*(Original Mix|Extended Mix|Radio Edit|Edit|Remix)\s*$",
-    re.IGNORECASE,
-)
-
-
-def _normalize_text(text: str) -> str:
-    """Shared normalization for both filenames and DB strings."""
-    text = _strip_diacritics(text)
-    # Beatport replaces apostrophes with underscores in filenames
-    text = text.replace("_", " ")
-    # Strip all apostrophe variants so Ain't == Aint == Ain t
-    text = text.replace("'", "").replace("\u2019", "").replace("`", "")
-    # Remove parenthetical mix labels: "(Original Mix)", "(Extended Mix)", etc.
-    text = re.sub(r"\s*\(.*?\)\s*", " ", text)
-    # Remove bracket tags: "[WAV]", "[320]", etc.
-    text = re.sub(r"\s*\[.*?\]\s*", " ", text)
-    # Strip trailing store suffixes like "- Edit", "- Extended Mix"
-    text = _MIX_SUFFIX_RE.sub("", text)
-    # Collapse whitespace and lowercase
-    return re.sub(r"\s+", " ", text).strip().lower()
-
-
-def _normalize_filename(name: str) -> str:
-    """Strip common Beatport/Traxsource filename noise for matching."""
-    return _normalize_text(Path(name).stem)
-
-
-def _split_artist_title(filename: str) -> tuple[str, str]:
-    """Split a Beatport-style filename into (artist, title).
-
-    Beatport convention: ``Artist - Track Title (Mix).wav``
-    Falls back to ("", full_stem) when no separator is found.
-    """
-    stem = Path(filename).stem
-    if " - " in stem:
-        parts = stem.split(" - ", 1)
-        return parts[0].strip(), parts[1].strip()
-    return "", stem.strip()
-
-
-def _score_against_track(filename: str, track: dict[str, Any]) -> int:
-    """Return a 0-100 fuzzy score for how well *filename* matches *track*."""
-    norm = _normalize_filename(filename)
-    artist_part, title_part = _split_artist_title(filename)
-
-    db_artist = _normalize_text(track.get("artist_name") or "")
-    db_title = _normalize_text(track.get("track_name") or "")
-    db_combined = f"{db_artist} {db_title}".strip()
-
-    scores: list[int] = []
-
-    # Full normalized filename vs DB combined (both sort and set variants)
-    scores.append(fuzz.token_sort_ratio(norm, db_combined))
-    scores.append(fuzz.token_set_ratio(norm, db_combined))
-
-    # If we extracted artist/title, compare parts individually
-    if artist_part:
-        artist_norm = _normalize_text(artist_part)
-        title_norm = _normalize_text(title_part)
-
-        # token_sort: penalizes extra/missing tokens
-        artist_sort = fuzz.token_sort_ratio(artist_norm, db_artist)
-        title_sort = fuzz.token_sort_ratio(title_norm, db_title)
-        scores.append(int(artist_sort * 0.35 + title_sort * 0.65))
-
-        # token_set: forgiving when one side has extra tokens (e.g. "- Edit")
-        artist_set = fuzz.token_set_ratio(artist_norm, db_artist)
-        title_set = fuzz.token_set_ratio(title_norm, db_title)
-        scores.append(int(artist_set * 0.35 + title_set * 0.65))
-
-    return max(scores)
-
-
-MATCH_THRESHOLD = 80
-
-
-class _WavHandler(FileSystemEventHandler):
-    """Filesystem event handler that delegates WAV files to the pipeline."""
+class _AudioHandler(FileSystemEventHandler):
+    """Filesystem event handler that delegates audio files to the pipeline."""
 
     def __init__(self, pipeline: FilePipeline) -> None:
         self._pipeline = pipeline
@@ -154,6 +87,7 @@ class FilePipeline:
         self._queue_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._claim_lock = threading.RLock()
 
         # Debounce: filename → last-seen timestamp
         self._seen: dict[str, float] = {}
@@ -186,7 +120,7 @@ class FilePipeline:
             logger.error("Downloads folder does not exist: %s", downloads)
             return
 
-        handler = _WavHandler(self)
+        handler = _AudioHandler(self)
         self._observer = Observer()
         self._observer.schedule(handler, str(downloads), recursive=False)
         self._observer.daemon = True
@@ -227,43 +161,114 @@ class FilePipeline:
             "queue_size": len(self._queue),
         }
 
-    def scan_downloads(self) -> list[str]:
-        """Scan the downloads folder for WAV files and enqueue any that pass filters.
-
-        Useful for picking up files that landed before the pipeline started or
-        that were missed due to a prior matching bug.
-        Returns the list of filenames enqueued.
-        """
+    def scan_downloads(self) -> dict[str, Any]:
+        """Match existing WAV/MP3 files in Downloads to buy-queue tracks."""
         cfg = get_config()
         downloads = Path(cfg.get("downloads_folder", "~/Downloads")).expanduser()
         if not downloads.is_dir():
             logger.warning("Downloads folder missing for scan: %s", downloads)
-            return []
+            return _empty_scan(folder_missing=True)
 
-        enqueued: list[str] = []
-        for wav in sorted(downloads.glob("*.wav")):
-            if wav.name.startswith("."):
+        files = list_audio_files(downloads)
+        if not files:
+            return _empty_scan()
+
+        with self._claim_lock:
+            return self._scan_files(files)
+
+    def _scan_files(self, files: list[Path]) -> dict[str, Any]:
+        open_candidates, downloaded = self._claim_pools()
+        matched: list[dict[str, Any]] = []
+        unmatched: list[dict[str, Any]] = []
+
+        for path in files:
+            with self._seen_lock:
+                self._seen[path.name] = time.time()
+            try:
+                row = self._scan_one(path, open_candidates, downloaded)
+            except Exception as exc:
+                logger.exception("Download scan failed for %s", path.name)
+                unmatched.append({
+                    "filename": path.name,
+                    "matched": False,
+                    "error": str(exc),
+                })
                 continue
-            self._force_enqueue(wav)
-            enqueued.append(wav.name)
+            if row.get("matched"):
+                matched.append(row)
+            else:
+                unmatched.append(row)
 
-        logger.info("Download scan complete — enqueued %d file(s)", len(enqueued))
-        return enqueued
+        logger.info(
+            "Download scan complete — %d file(s), %d matched, %d unmatched",
+            len(files),
+            len(matched),
+            len(unmatched),
+        )
+        return {
+            "count": len(files),
+            "matched": matched,
+            "unmatched": unmatched,
+            "files": [path.name for path in files],
+            "folder_missing": False,
+        }
 
-    # ------------------------------------------------------------------
-    # Queueing / debounce
-    # ------------------------------------------------------------------
+    def _scan_one(
+        self,
+        path: Path,
+        open_candidates: list[dict[str, Any]],
+        downloaded: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not path.exists() or path.stat().st_size <= 0:
+            return {"filename": path.name, "matched": False, "reason": "empty"}
+        if not self._scan_file_ready(path):
+            return {"filename": path.name, "matched": False, "reason": "unstable"}
 
-    def _force_enqueue(self, path: Path) -> None:
-        """Enqueue a file bypassing debounce (used by scan_downloads)."""
-        if not self._should_process(path):
-            return
-        with self._seen_lock:
-            self._seen[path.name] = time.time()
-        self.last_event_time = time.time()
-        with self._queue_lock:
-            self._queue.append(path)
-        logger.info("Queued for processing (scan): %s", path.name)
+        track, score, kind = pick_track_for_file(path, open_candidates, downloaded)
+        if track is None:
+            return {"filename": path.name, "matched": False, "score": score}
+
+        consume_track(open_candidates, track["id"])
+        consume_track(downloaded, track["id"])
+        if kind != "existing":
+            update_track_status(
+                track["id"],
+                "downloaded",
+                {"download_path": str(path.resolve())},
+            )
+        logger.info(
+            "Scan matched %s → %s - %s (kind=%s score=%d)",
+            path.name, track["artist_name"], track["track_name"], kind, score,
+        )
+        return {
+            "filename": path.name,
+            "matched": True,
+            "track_id": track["id"],
+            "track_name": track["track_name"],
+            "artist_name": track["artist_name"],
+            "score": score,
+            "kind": kind,
+        }
+
+    @staticmethod
+    def _claim_pools() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        return (
+            get_tracks_by_statuses(list(OPEN_MATCH_STATUSES)),
+            get_tracks_by_status("downloaded"),
+        )
+
+    @staticmethod
+    def _scan_file_ready(path: Path) -> bool:
+        """True when size is > 0 and unchanged across one short sample."""
+        if not path.exists():
+            return False
+        size = path.stat().st_size
+        if size <= 0:
+            return False
+        if SCAN_STABLE_INTERVAL <= 0:
+            return True
+        time.sleep(SCAN_STABLE_INTERVAL)
+        return path.exists() and path.stat().st_size == size
 
     def enqueue(self, path: Path) -> None:
         """Add a file to the processing queue if it passes filters."""
@@ -285,11 +290,11 @@ class FilePipeline:
         logger.info("Queued for processing: %s", name)
 
     def _should_process(self, path: Path) -> bool:
-        """Return True if the file is a WAV we should handle."""
+        """Return True if the file is a WAV/MP3 we should handle."""
         suffix = path.suffix.lower()
         if suffix in TEMP_EXTENSIONS:
             return False
-        if suffix != ".wav":
+        if suffix not in AUDIO_EXTENSIONS:
             return False
         if path.name.startswith("."):
             return False
@@ -317,20 +322,28 @@ class FilePipeline:
                 logger.exception("Unexpected error processing %s", path.name)
 
     def _process_file(self, path: Path) -> None:
-        """Process a single WAV file end-to-end."""
+        """Watchdog path: wait for a stable file, then claim a queue row."""
         if not path.exists():
             logger.debug("File disappeared before processing: %s", path.name)
             return
 
         self._broadcast("file_detected", {"filename": path.name})
 
-        # Wait for download to finish (stable file size)
         if not self._wait_for_stable_size(path):
             logger.warning("File never stabilized: %s", path.name)
             return
 
-        # Try to match against carted tracks
-        track, score = self._match_to_track(path.name)
+        with self._claim_lock:
+            open_candidates, downloaded = self._claim_pools()
+            track, score, kind = pick_track_for_file(
+                path, open_candidates, downloaded,
+            )
+            if track is not None and kind != "existing":
+                update_track_status(
+                    track["id"],
+                    "downloaded",
+                    {"download_path": str(path.resolve())},
+                )
 
         if track is None:
             self.files_unmatched += 1
@@ -342,9 +355,13 @@ class FilePipeline:
             notify_file_unmatched(path.name)
             return
 
+        if kind == "existing":
+            logger.info("Already assigned %s → track %s", path.name, track["id"])
+            return
+
         logger.info(
-            "Matched %s → %s - %s (score=%d)",
-            path.name, track["artist_name"], track["track_name"], score,
+            "Matched %s → %s - %s (kind=%s score=%d)",
+            path.name, track["artist_name"], track["track_name"], kind, score,
         )
         self._broadcast("file_matched", {
             "filename": path.name,
@@ -353,13 +370,6 @@ class FilePipeline:
             "artist_name": track["artist_name"],
             "score": score,
         })
-
-        # Pause for manual review (playlists, etc.) before move + import
-        update_track_status(
-            track["id"],
-            "downloaded",
-            {"download_path": str(path.resolve())},
-        )
         self._broadcast("file_downloaded", {
             "track_id": track["id"],
             "filename": path.name,
@@ -397,38 +407,12 @@ class FilePipeline:
         return False
 
     # ------------------------------------------------------------------
-    # Track matching
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _match_to_track(filename: str) -> tuple[dict[str, Any] | None, int]:
-        """Fuzzy-match *filename* against carted/purchased tracks in Supabase.
-
-        Returns (best_matching_track, score) or (None, 0).
-        """
-        candidates = get_tracks_by_status("carted") + get_tracks_by_status("purchased")
-        if not candidates:
-            return None, 0
-
-        best_track: dict[str, Any] | None = None
-        best_score = 0
-        for track in candidates:
-            score = _score_against_track(filename, track)
-            if score > best_score:
-                best_score = score
-                best_track = track
-
-        if best_score >= MATCH_THRESHOLD:
-            return best_track, best_score
-        return None, best_score
-
-    # ------------------------------------------------------------------
     # File move
     # ------------------------------------------------------------------
 
     @staticmethod
     def _move_to_drive(src: Path, track: dict[str, Any]) -> Path:
-        """Move the WAV file to the external drive.
+        """Move the audio file to the external drive.
 
         Returns the final destination Path.
         Raises RuntimeError if the drive is not mounted.
@@ -494,6 +478,10 @@ class FilePipeline:
 
     def process_track(self, track_id: int) -> dict[str, Any]:
         """Move ``download_path`` to the drive, import to iTunes, mark ``done``."""
+        with self._claim_lock:
+            return self._process_track_locked(track_id)
+
+    def _process_track_locked(self, track_id: int) -> dict[str, Any]:
         from database import get_supabase
 
         result = get_supabase().table("tracks").select("*").eq("id", track_id).execute()
@@ -566,17 +554,18 @@ class FilePipeline:
 
     def process_all_downloaded(self) -> dict[str, Any]:
         """Process every track in ``downloaded`` status. Returns per-track outcomes."""
-        downloaded = get_tracks_by_status("downloaded")
-        processed: list[int] = []
-        errors: list[dict[str, Any]] = []
-        for row in downloaded:
-            tid = row["id"]
-            try:
-                self.process_track(tid)
-                processed.append(tid)
-            except Exception as exc:
-                errors.append({"track_id": tid, "error": str(exc)})
-        return {"processed": processed, "errors": errors, "count": len(processed)}
+        with self._claim_lock:
+            downloaded = get_tracks_by_status("downloaded")
+            processed: list[int] = []
+            errors: list[dict[str, Any]] = []
+            for row in downloaded:
+                tid = row["id"]
+                try:
+                    self._process_track_locked(tid)
+                    processed.append(tid)
+                except Exception as exc:
+                    errors.append({"track_id": tid, "error": str(exc)})
+            return {"processed": processed, "errors": errors, "count": len(processed)}
 
     # ------------------------------------------------------------------
     # Manual assignment (for unmatched files)
@@ -584,11 +573,15 @@ class FilePipeline:
 
     def assign_file(self, filepath: str, track_id: int) -> dict[str, Any]:
         """Manually assign an unmatched file to a track. Called from the API."""
+        with self._claim_lock:
+            return self._assign_file_locked(filepath, track_id)
+
+    def _assign_file_locked(self, filepath: str, track_id: int) -> dict[str, Any]:
         path = Path(filepath)
         if not path.exists():
             raise FileNotFoundError(f"File not found: {filepath}")
-        if path.suffix.lower() != ".wav":
-            raise ValueError("Only WAV files are supported")
+        if path.suffix.lower() not in AUDIO_EXTENSIONS:
+            raise ValueError("Only WAV and MP3 files are supported")
 
         from database import get_supabase
         result = get_supabase().table("tracks").select("*").eq("id", track_id).execute()

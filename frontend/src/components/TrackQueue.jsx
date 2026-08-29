@@ -18,6 +18,7 @@ import {
   cartButtonDisabled,
   shouldIgnoreCartClick,
 } from "./actionButtonFeedback";
+import { describeScanResult } from "./scanDownloadsFeedback";
 
 const REFRESH_EVENTS = [
   "scan_complete",
@@ -48,6 +49,7 @@ export default function TrackQueue({ wsMessage }) {
   const [cartState, setCartState] = useState(null);
   const [cartingTrackId, setCartingTrackId] = useState(null);
   const [scanningDownloads, setScanningDownloads] = useState(false);
+  const [scanNotice, setScanNotice] = useState(null);
   const [processingDownloads, setProcessingDownloads] = useState(false);
   const [resolvingLinks, setResolvingLinks] = useState(false);
   const [cartStarting, setCartStarting] = useState(null);
@@ -269,9 +271,12 @@ export default function TrackQueue({ wsMessage }) {
 
   const handleScanDownloads = async () => {
     setScanningDownloads(true);
+    setScanNotice(null);
     try {
-      await scanDownloads();
+      const result = await scanDownloads();
+      const summary = describeScanResult(result);
       await fetchData();
+      setScanNotice(summary);
     } catch (err) {
       setError(`Scan downloads failed: ${err.message}`);
     } finally {
@@ -412,7 +417,7 @@ export default function TrackQueue({ wsMessage }) {
             color="accent"
             onClick={handleScanDownloads}
             label={scanningDownloads ? "Scanning…" : "Scan Downloads"}
-            disabled={scanningDownloads || isCartRunning}
+            disabled={scanningDownloads || processingDownloads || isCartRunning}
           />
           {downloadedCount > 0 && (
             <ActionBtn
@@ -423,7 +428,7 @@ export default function TrackQueue({ wsMessage }) {
                   ? "Processing…"
                   : `Process All (${downloadedCount})`
               }
-              disabled={processingDownloads || isCartRunning}
+              disabled={processingDownloads || scanningDownloads || isCartRunning}
             />
           )}
         </div>
@@ -432,6 +437,17 @@ export default function TrackQueue({ wsMessage }) {
       {error && (
         <div className="bg-red-500/10 border border-red-500/30 text-red-400 text-sm rounded px-4 py-2">
           {error}
+        </div>
+      )}
+      {scanNotice && (
+        <div
+          className={
+            scanNotice.tone === "warn"
+              ? "bg-amber-500/10 border border-amber-500/30 text-amber-400 text-sm rounded px-4 py-2"
+              : "bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-sm rounded px-4 py-2"
+          }
+        >
+          {scanNotice.text}
         </div>
       )}
 
