@@ -24,7 +24,13 @@ from bs4 import BeautifulSoup
 
 from beatport_browser import BeatportBrowser, BeatportBrowserError
 from database import get_supabase, update_track_fields
-from store_match import StoreQuery, parse_store_hit, parse_store_query, score_hit
+from store_match import (
+    StoreCandidate,
+    StoreQuery,
+    parse_store_hit,
+    parse_store_query,
+    score_hit,
+)
 from traxsource_browser import TraxsourceBrowser, TraxsourceBrowserError
 from ws_manager import manager
 
@@ -86,9 +92,15 @@ def _store_query(title: str, artist: str) -> StoreQuery:
     return parse_store_query(artist=artist, title=title)
 
 
-def _score_store_row(query: StoreQuery, title: str, artist: str, url: str) -> int:
+def _score_store_row(query: StoreQuery, candidate: StoreCandidate) -> int:
     """Score a candidate through store_match (title parse only in this slice)."""
-    hit = parse_store_hit(title=title, artist=artist, url=url)
+    hit = parse_store_hit(
+        title=candidate.title,
+        artist=candidate.artist,
+        url=candidate.url,
+        mix_name=candidate.mix_name,
+        isrc=candidate.isrc,
+    )
     return score_hit(query, hit)
 
 
@@ -261,7 +273,16 @@ def _best_beatport_track_match(
         if not track_id or not slug:
             continue
         url = f"https://www.beatport.com/track/{slug}/{track_id}"
-        score = _score_store_row(query, raw_name, artist_str, url)
+        candidate = StoreCandidate(
+            title=raw_name,
+            artist=artist_str,
+            url=url,
+            slug=slug,
+            track_id=track_id,
+            mix_name=t.get("mix_name"),
+            isrc=t.get("isrc"),
+        )
+        score = _score_store_row(query, candidate)
         if score > best_score:
             best_score = score
             best_url = url
@@ -296,7 +317,16 @@ def _best_beatport_release_match(
         if not release_id or not slug:
             continue
         url = f"https://www.beatport.com/release/{slug}/{release_id}"
-        score = _score_store_row(query, raw_name, artist_str, url)
+        candidate = StoreCandidate(
+            title=raw_name,
+            artist=artist_str,
+            url=url,
+            slug=slug,
+            track_id=release_id,
+            mix_name=None,
+            isrc=None,
+        )
+        score = _score_store_row(query, candidate)
         if score > best_score:
             best_score = score
             best_url = url
@@ -369,7 +399,16 @@ def _parse_beatport_html(
         if not href:
             continue
         url = href if href.startswith("http") else f"https://www.beatport.com{href}"
-        score = _score_store_row(query, title_text, artist_text, url)
+        candidate = StoreCandidate(
+            title=title_text,
+            artist=artist_text,
+            url=url,
+            slug="",
+            track_id=None,
+            mix_name=None,
+            isrc=None,
+        )
+        score = _score_store_row(query, candidate)
         if score > best_score:
             best_score = score
             best_url = url
@@ -446,7 +485,16 @@ def _parse_traxsource_html(
         if not href:
             return
         url = _absolutize_traxsource(href)
-        score = _score_store_row(query, title, artist, url)
+        candidate = StoreCandidate(
+            title=title,
+            artist=artist,
+            url=url,
+            slug="",
+            track_id=None,
+            mix_name=None,
+            isrc=None,
+        )
+        score = _score_store_row(query, candidate)
         if score >= MIN_FALLBACK_SCORE and score > best_score:
             best_score = score
             best_url = url

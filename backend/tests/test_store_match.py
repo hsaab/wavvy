@@ -30,6 +30,7 @@ BEATPORT_BOB_FOSSIL_REMIX = (
 )
 BEATPORT_ECHO_ORIGINAL = "https://www.beatport.com/track/echo/10977073"
 BEATPORT_ECHO_REMIX = "https://www.beatport.com/track/echo-roderic-remix/10977999"
+BEATPORT_ELECTRIC_LOVE = "https://www.beatport.com/track/electric-love/999001"
 
 GAB_RHOME_ARTISTS = "Gab Rhome, Mark Alow, Armen Miran"
 BOB_FOSSIL_REMIX_TITLE = "Bob Fossil - Armen Miran Remix"
@@ -185,3 +186,57 @@ def test_search_words_for_a_plain_title_are_the_song_name_and_the_first_artist()
     query = _query("Elfenberg", "Kigelia")
 
     assert build_search_query(query) == "Kigelia Elfenberg"
+
+
+def test_a_beatport_row_with_mix_name_and_isrc_still_parses_and_keeps_those_fields() -> None:
+    """Beatport mix_name and isrc stay on the hit; mix still comes from the title."""
+    hit = parse_store_hit(
+        title="Electric Love",
+        artist="Yulia Niko",
+        url=BEATPORT_ELECTRIC_LOVE,
+        mix_name="Yulia Niko Remix",
+        isrc="DEA002412345",
+    )
+
+    assert hit.title_core == "Electric Love"
+    assert hit.url == BEATPORT_ELECTRIC_LOVE
+    assert hit.mix_name == "Yulia Niko Remix"
+    assert hit.isrc == "DEA002412345"
+    # mix_name is attached only. Mix identity still comes from the title, not this field.
+    assert hit.mix_label == ""
+    assert hit.mix_kind == "unknown"
+
+
+def test_a_traxsource_row_parses_with_mix_name_and_isrc_as_none() -> None:
+    """Traxsource has no mix_name or isrc, so both fields are None on the hit."""
+    hit = parse_store_hit(
+        title="Bob Fossil",
+        artist="",
+        url=TRAXSOURCE_BOB_FOSSIL_REMIX,
+        mix_name=None,
+        isrc=None,
+    )
+
+    assert hit.mix_name is None
+    assert hit.isrc is None
+    assert hit.title_core == "Bob Fossil"
+    assert hit.artists == []
+    # Mix still comes from the slug, same as the existing Bob Fossil journey.
+    assert hit.mix_kind == "remix"
+
+
+def test_passing_mix_name_and_isrc_does_not_change_the_kigelia_score() -> None:
+    """Optional mix_name and isrc leave the canned Kigelia score unchanged."""
+    url = "https://www.beatport.com/track/kigelia/1001"
+    query = _query("Elfenberg", "Kigelia")
+    plain = _hit("Kigelia (Original Mix)", "Elfenberg", url)
+    with_fields = parse_store_hit(
+        title="Kigelia (Original Mix)",
+        artist="Elfenberg",
+        url=url,
+        mix_name="Original Mix",
+        isrc="DEKIG0000001",
+    )
+
+    assert score_hit(query, with_fields) == score_hit(query, plain)
+    assert score_hit(query, with_fields) >= ACCEPT_FLOOR

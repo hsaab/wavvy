@@ -52,6 +52,19 @@ class StoreQuery:
 
 
 @dataclass
+class StoreCandidate:
+    """Raw store search row. Traxsource leaves mix_name and isrc as None."""
+
+    title: str
+    artist: str
+    url: str
+    slug: str
+    track_id: str | int | None
+    mix_name: str | None
+    isrc: str | None
+
+
+@dataclass
 class StoreHit:
     """Parsed store row. slug_text is title/mix evidence, not artist credits."""
 
@@ -62,6 +75,8 @@ class StoreHit:
     remixers: list[str]
     slug_text: str
     url: str
+    mix_name: str | None
+    isrc: str | None
 
 
 def parse_store_query(artist: str, title: str) -> StoreQuery:
@@ -78,7 +93,13 @@ def parse_store_query(artist: str, title: str) -> StoreQuery:
     )
 
 
-def parse_store_hit(title: str, artist: str, url: str) -> StoreHit:
+def parse_store_hit(
+    title: str,
+    artist: str,
+    url: str,
+    mix_name: str | None = None,
+    isrc: str | None = None,
+) -> StoreHit:
     """Parse a store candidate. Mix may also be recovered from the URL slug."""
     title_core, artists, mix_kind, mix_label, remixers = _parse_identity(
         artist or "", title or "",
@@ -98,6 +119,8 @@ def parse_store_hit(title: str, artist: str, url: str) -> StoreHit:
         remixers=remixers,
         slug_text=slug_text,
         url=url or "",
+        mix_name=mix_name,
+        isrc=isrc,
     )
 
 
