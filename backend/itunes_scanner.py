@@ -19,6 +19,28 @@ logger = logging.getLogger(__name__)
 
 FUZZY_THRESHOLD = 90
 
+# AppleScript's default list join is comma; artist names like "Dazed, Nelav" contain
+# that character. U+001F cannot appear in Music metadata.
+LIBRARY_DUMP_SEPARATOR = "\x1f"
+
+
+def _fuzzy_candidates(entry: LibraryEntry) -> list[str]:
+    """Artist+name strings to score. Empty-artist rows may be Title - Artist."""
+    candidates = [f"{entry.artist} {entry.name}".lower()]
+    if entry.artist.strip() or " - " not in entry.name:
+        return candidates
+    parsed_title, parsed_artist = entry.name.split(" - ", 1)
+    parsed_title = parsed_title.strip()
+    parsed_artist = parsed_artist.strip()
+    if not parsed_title or not parsed_artist:
+        return candidates
+    candidates.append(f"{parsed_artist} {parsed_title}".lower())
+    # Music keeps [Extended] in the title half; Spotify titles often omit it.
+    core_title = parsed_title.split(" [", 1)[0].strip()
+    if core_title and core_title != parsed_title:
+        candidates.append(f"{parsed_artist} {core_title}".lower())
+    return candidates
+
 
 @dataclass
 class LibraryEntry:
@@ -58,24 +80,42 @@ class ITunesLibraryCache:
                 return 0
 
             names_raw = run_applescript(
-                'tell application "Music" to get name of every track of library playlist 1'
+                "tell application \"Music\"\n"
+                "set AppleScript's text item delimiters to (ASCII character 31)\n"
+                "get name of every track of library playlist 1 as text\n"
+                "end tell"
             )
             artists_raw = run_applescript(
-                'tell application "Music" to get artist of every track of library playlist 1'
+                "tell application \"Music\"\n"
+                "set AppleScript's text item delimiters to (ASCII character 31)\n"
+                "get artist of every track of library playlist 1 as text\n"
+                "end tell"
             )
 
-            names = [n.strip() for n in names_raw.split(",")] if names_raw else []
-            artists = [a.strip() for a in artists_raw.split(",")] if artists_raw else []
+            names = (
+                [n.strip() for n in names_raw.split(LIBRARY_DUMP_SEPARATOR)]
+                if names_raw
+                else []
+            )
+            artists = (
+                [a.strip() for a in artists_raw.split(LIBRARY_DUMP_SEPARATOR)]
+                if artists_raw
+                else []
+            )
 
             if len(names) != len(artists):
+                self.scan_error = (
+                    f"Name/artist count mismatch ({len(names)} vs {len(artists)})"
+                )
                 logger.warning(
-                    "Name/artist count mismatch (%d vs %d) — using shorter list",
+                    "Name/artist count mismatch (%d vs %d); refusing cache",
                     len(names), len(artists),
                 )
+                return 0
 
             entries: list[LibraryEntry] = []
             keys: set[str] = set()
-            for name, artist in zip(names, artists):
+            for name, artist in zip(names, artists, strict=True):
                 entry = LibraryEntry(name=name, artist=artist)
                 entries.append(entry)
                 keys.add(entry.key)
@@ -110,9 +150,9 @@ class ITunesLibraryCache:
             return True
         query = f"{artist} {title}".lower()
         for entry in self._entries:
-            candidate = f"{entry.artist} {entry.name}".lower()
-            if fuzz.token_sort_ratio(query, candidate) >= FUZZY_THRESHOLD:
-                return True
+            for candidate in _fuzzy_candidates(entry):
+                if fuzz.token_sort_ratio(query, candidate) >= FUZZY_THRESHOLD:
+                    return True
         return False
 
     def add_entry(self, artist: str, title: str) -> None:

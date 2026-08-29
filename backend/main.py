@@ -12,10 +12,15 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import load_config, get_config, save_config, get_supabase_creds, get_spotify_creds
-from database import init_supabase, validate_connection
+from database import (
+    get_tracks_by_statuses,
+    init_supabase,
+    update_track_status,
+    validate_connection,
+)
 from file_pipeline import pipeline
 from itunes_bridge import is_music_app_running
-from itunes_scanner import library_cache
+from itunes_scanner import ITunesLibraryCache, library_cache
 from ws_manager import manager
 
 load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
@@ -46,6 +51,7 @@ async def lifespan(app: FastAPI):
     # Scan iTunes library in background thread (non-blocking)
     try:
         await asyncio.to_thread(library_cache.scan)
+        mark_owned_queue_tracks_skipped(library_cache)
     except Exception as exc:
         logger.warning("iTunes library scan failed during startup: %s", exc)
 
@@ -273,6 +279,27 @@ ACTIVE_STATUSES = [
     "downloaded",
 ]
 
+# Pre-purchase buy-queue only. ACTIVE_STATUSES also includes processing/downloaded.
+BUY_QUEUE_STATUSES = [
+    "new",
+    "approved",
+    "carted",
+    "cart_failed",
+]
+
+
+def mark_owned_queue_tracks_skipped(cache: ITunesLibraryCache) -> int:
+    """Set buy-queue rows that already exist in the Music library to skipped."""
+    tracks = get_tracks_by_statuses(BUY_QUEUE_STATUSES)
+    skipped = 0
+    for track in tracks:
+        artist = track.get("artist_name") or ""
+        name = track.get("track_name") or ""
+        if cache.contains_fuzzy(artist, name):
+            update_track_status(track["id"], "skipped")
+            skipped += 1
+    return skipped
+
 
 @app.get("/api/tracks")
 async def list_tracks(status: str | None = None, search: str | None = None):
@@ -420,7 +447,8 @@ async def library_scan():
     if library_cache.is_scanning:
         return {"ok": False, "message": "Scan already in progress"}
     count = await asyncio.to_thread(library_cache.scan)
-    return {"ok": True, "track_count": count}
+    skipped = mark_owned_queue_tracks_skipped(library_cache)
+    return {"ok": True, "track_count": count, "skipped": skipped}
 
 
 # ---------------------------------------------------------------------------
