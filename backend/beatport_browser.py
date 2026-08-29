@@ -63,6 +63,8 @@ from playwright.async_api import (
     async_playwright,
 )
 
+from store_match import build_search_query, parse_store_query
+
 logger = logging.getLogger(__name__)
 
 SEARCH_URL_TEMPLATE = "https://www.beatport.com/search?q={query}"
@@ -230,7 +232,9 @@ class BeatportBrowser:
         with a ``search-all`` query key.
         """
         context = await self._new_context()
-        query = quote_plus(f"{artist} {title}".strip())
+        query = quote_plus(
+            build_search_query(parse_store_query(artist=artist, title=title))
+        )
         url = SEARCH_URL_TEMPLATE.format(query=query)
 
         try:
