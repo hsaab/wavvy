@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 
 FUZZY_THRESHOLD = 90
 
+# AppleScript's default list join is comma; artist names like "Dazed, Nelav" contain
+# that character. U+001F cannot appear in Music metadata.
+LIBRARY_DUMP_SEPARATOR = "\x1f"
+
 
 @dataclass
 class LibraryEntry:
@@ -58,14 +62,28 @@ class ITunesLibraryCache:
                 return 0
 
             names_raw = run_applescript(
-                'tell application "Music" to get name of every track of library playlist 1'
+                "tell application \"Music\"\n"
+                "set AppleScript's text item delimiters to (ASCII character 31)\n"
+                "get name of every track of library playlist 1 as text\n"
+                "end tell"
             )
             artists_raw = run_applescript(
-                'tell application "Music" to get artist of every track of library playlist 1'
+                "tell application \"Music\"\n"
+                "set AppleScript's text item delimiters to (ASCII character 31)\n"
+                "get artist of every track of library playlist 1 as text\n"
+                "end tell"
             )
 
-            names = [n.strip() for n in names_raw.split(",")] if names_raw else []
-            artists = [a.strip() for a in artists_raw.split(",")] if artists_raw else []
+            names = (
+                [n.strip() for n in names_raw.split(LIBRARY_DUMP_SEPARATOR)]
+                if names_raw
+                else []
+            )
+            artists = (
+                [a.strip() for a in artists_raw.split(LIBRARY_DUMP_SEPARATOR)]
+                if artists_raw
+                else []
+            )
 
             if len(names) != len(artists):
                 logger.warning(
