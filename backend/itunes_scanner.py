@@ -86,14 +86,18 @@ class ITunesLibraryCache:
             )
 
             if len(names) != len(artists):
+                self.scan_error = (
+                    f"Name/artist count mismatch ({len(names)} vs {len(artists)})"
+                )
                 logger.warning(
-                    "Name/artist count mismatch (%d vs %d) — using shorter list",
+                    "Name/artist count mismatch (%d vs %d); refusing cache",
                     len(names), len(artists),
                 )
+                return 0
 
             entries: list[LibraryEntry] = []
             keys: set[str] = set()
-            for name, artist in zip(names, artists):
+            for name, artist in zip(names, artists, strict=True):
                 entry = LibraryEntry(name=name, artist=artist)
                 entries.append(entry)
                 keys.add(entry.key)

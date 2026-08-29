@@ -28,7 +28,8 @@ def run_applescript(script: str) -> str:
         stderr = result.stderr.strip()
         logger.error("AppleScript failed (rc=%d): %s", result.returncode, stderr)
         raise RuntimeError(f"AppleScript error: {stderr}")
-    return result.stdout.strip()
+    # U+001F is whitespace in Python; strip() would drop trailing empty Music fields.
+    return result.stdout.rstrip("\r\n")
 
 
 def is_music_app_running() -> bool:
