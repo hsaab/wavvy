@@ -167,9 +167,7 @@ def score_hit(query: StoreQuery, hit: StoreHit) -> int:
             return 0
         # Extended / Radio / Club / Dub share the remixer as an artist. Those
         # rows are not the named remix unless the remixer is in the mix fields.
-        if not _is_remix_hit(hit) and not _remixer_overlap(
-            query, hit, include_artists=False,
-        ):
+        if not _remixer_overlap(query, hit, include_artists=False):
             logger.debug(
                 "Remix gate rejected %s: generic version mix", hit.url,
             )

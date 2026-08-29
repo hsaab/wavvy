@@ -269,7 +269,16 @@ def test_named_remix_rejects_sibling_version_mixes_that_only_share_the_remixer_a
     )
     assert score_hit(query, remix) >= ACCEPT_FLOOR
 
-    for mix_name in ("Extended Mix", "Radio Edit", "Club Mix", "Dub Mix"):
+    for mix_name in (
+        "Extended Mix",
+        "Radio Edit",
+        "Club Mix",
+        "Dub Mix",
+        "Extended Remix",
+        "Radio Remix",
+        "Club Remix",
+        "Dub Remix",
+    ):
         sibling = parse_store_hit(
             title="Electric Love",
             artist="Aiwaska, Starving Yet Full, Yulia Niko",
@@ -277,6 +286,14 @@ def test_named_remix_rejects_sibling_version_mixes_that_only_share_the_remixer_a
             mix_name=mix_name,
         )
         assert score_hit(query, sibling) == 0, mix_name
+
+    slug_sibling = parse_store_hit(
+        title="Electric Love",
+        artist="Aiwaska, Starving Yet Full, Yulia Niko",
+        url="https://www.beatport.com/track/electric-love-remix-special/1",
+        mix_name="Extended Mix",
+    )
+    assert score_hit(query, slug_sibling) == 0
 
     assert _best_url(
         "Aiwaska, Starving Yet Full, Yulia Niko",
