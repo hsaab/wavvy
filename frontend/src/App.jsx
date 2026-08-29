@@ -110,7 +110,17 @@ export default function App() {
     setRefreshingLibrary(true);
     try {
       const result = await scanLibrary();
-      addToast(`iTunes library refreshed — ${result.track_count} tracks`, "success");
+      if (!result.ok) {
+        addToast(
+          result.scan_error || result.message || "Library scan failed",
+          "error",
+        );
+        return;
+      }
+      addToast(
+        `iTunes library refreshed: ${result.track_count} tracks, ${result.skipped ?? 0} skipped`,
+        "success",
+      );
     } catch (err) {
       addToast(`Library scan failed: ${err.message}`, "error");
     } finally {

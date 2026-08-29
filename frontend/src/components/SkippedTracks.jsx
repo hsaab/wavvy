@@ -27,7 +27,8 @@ export default function SkippedTracks({ wsMessage }) {
     if (!wsMessage) return;
     if (
       wsMessage.type === "scan_complete" ||
-      wsMessage.type === "scan_batch_complete"
+      wsMessage.type === "scan_batch_complete" ||
+      wsMessage.type === "library_scan_complete"
     ) {
       fetchData();
     }
@@ -35,7 +36,7 @@ export default function SkippedTracks({ wsMessage }) {
 
   const handleUnskip = async (track) => {
     try {
-      await updateTrack(track.id, { status: "new" });
+      await updateTrack(track.id, { status: "approved" });
       setTracks((prev) => prev.filter((t) => t.id !== track.id));
     } catch (err) {
       setError(`Failed to unskip: ${err.message}`);

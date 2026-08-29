@@ -26,6 +26,7 @@ const REFRESH_EVENTS = [
   "file_complete",
   "file_downloaded",
   "cart_complete",
+  "library_scan_complete",
 ];
 
 const CART_EVENTS = [

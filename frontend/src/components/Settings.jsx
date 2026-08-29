@@ -102,6 +102,10 @@ export default function Settings() {
     setLibraryScanning(true);
     try {
       const result = await scanLibrary();
+      if (!result.ok) {
+        setError(result.scan_error || result.message || "Library scan failed");
+        return;
+      }
       setLibraryStatus((prev) => ({
         ...prev,
         track_count: result.track_count,
