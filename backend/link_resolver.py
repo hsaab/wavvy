@@ -87,39 +87,23 @@ def _classify_confidence(score: int) -> str:
     return "low"
 
 
-def _store_query(title: str, artist: str) -> StoreQuery:
+def _store_query(
+    title: str, artist: str, isrc: str | None = None,
+) -> StoreQuery:
     """Parse source identity once per search page."""
-    return parse_store_query(artist=artist, title=title)
+    return parse_store_query(artist=artist, title=title, isrc=isrc)
 
 
-def _title_for_scoring(title: str, mix_name: str | None) -> str:
-    """Attach mix_name in a form ``_split_mix`` understands, without changing parse identity.
-
-    Beatport often stores ``Electric Love`` plus mix_name ``Yulia Niko Remix``. A
-    bare ``Electric Love Yulia Niko Remix`` still parses as no-mix and scores 0.
-    """
-    mix = (mix_name or "").strip()
-    if not mix:
-        return title
-    if mix.lower() in (title or "").lower():
-        return title
-    return f"{title} ({mix})"
-
-
-def _score_store_row(
-    query: StoreQuery,
-    candidate: StoreCandidate,
-    isrc: str | None = None,
-) -> int:
-    """Score a candidate. Fold mix_name into the title before parse, then score."""
+def _score_store_row(query: StoreQuery, candidate: StoreCandidate) -> int:
+    """Parse a raw store row and score it against the source identity."""
     hit = parse_store_hit(
-        title=_title_for_scoring(candidate.title, candidate.mix_name),
+        title=candidate.title,
         artist=candidate.artist,
         url=candidate.url,
         mix_name=candidate.mix_name,
         isrc=candidate.isrc,
     )
-    return score_hit(query, hit, isrc=isrc)
+    return score_hit(query, hit)
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +261,7 @@ def _best_beatport_track_match(
     isrc: str | None = None,
 ) -> tuple[str | None, int]:
     """Score each track hit and return the best ``(url, score)`` pair."""
-    query = _store_query(target_title, target_artist)
+    query = _store_query(target_title, target_artist, isrc=isrc)
     best_url: str | None = None
     best_score = 0
 
@@ -296,12 +280,10 @@ def _best_beatport_track_match(
             title=raw_name,
             artist=artist_str,
             url=url,
-            slug=slug,
-            track_id=track_id,
             mix_name=t.get("mix_name"),
             isrc=t.get("isrc"),
         )
-        score = _score_store_row(query, candidate, isrc=isrc)
+        score = _score_store_row(query, candidate)
         if score > best_score:
             best_score = score
             best_url = url
@@ -336,15 +318,7 @@ def _best_beatport_release_match(
         if not release_id or not slug:
             continue
         url = f"https://www.beatport.com/release/{slug}/{release_id}"
-        candidate = StoreCandidate(
-            title=raw_name,
-            artist=artist_str,
-            url=url,
-            slug=slug,
-            track_id=release_id,
-            mix_name=None,
-            isrc=None,
-        )
+        candidate = StoreCandidate(title=raw_name, artist=artist_str, url=url)
         score = _score_store_row(query, candidate)
         if score > best_score:
             best_score = score
@@ -419,15 +393,7 @@ def _parse_beatport_html(
         if not href:
             continue
         url = href if href.startswith("http") else f"https://www.beatport.com{href}"
-        candidate = StoreCandidate(
-            title=title_text,
-            artist=artist_text,
-            url=url,
-            slug="",
-            track_id=None,
-            mix_name=None,
-            isrc=None,
-        )
+        candidate = StoreCandidate(title=title_text, artist=artist_text, url=url)
         score = _score_store_row(query, candidate)
         if score > best_score:
             best_score = score
@@ -506,15 +472,7 @@ def _parse_traxsource_html(
         if not href:
             return
         url = _absolutize_traxsource(href)
-        candidate = StoreCandidate(
-            title=title,
-            artist=artist,
-            url=url,
-            slug="",
-            track_id=None,
-            mix_name=None,
-            isrc=None,
-        )
+        candidate = StoreCandidate(title=title, artist=artist, url=url)
         score = _score_store_row(query, candidate)
         if score >= MIN_FALLBACK_SCORE and score > best_score:
             best_score = score

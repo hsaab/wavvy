@@ -10,7 +10,6 @@ Install the runner (from backend/):
 
 from __future__ import annotations
 
-import inspect
 import json
 
 from link_resolver import (
@@ -37,6 +36,18 @@ ELECTRIC_LOVE_ROW = {
         {"artist_name": "Yulia Niko"},
     ],
     "isrc": "DEA002412345",
+}
+ELECTRIC_LOVE_EXTENDED_ROW = {
+    "track_name": "Electric Love",
+    "mix_name": "Extended Mix",
+    "track_id": 29897000,
+    "slug": "",
+    "artists": [
+        {"artist_name": "Aiwaska"},
+        {"artist_name": "Starving Yet Full"},
+        {"artist_name": "Yulia Niko"},
+    ],
+    "isrc": "DEA00EXTENDED",
 }
 SCUZE_ME_ROW = {
     "track_name": "Scuze Me",
@@ -103,14 +114,6 @@ def _search_all_html(tracks: list[dict]) -> str:
     )
 
 
-def _call_with_isrc(fn, *args, isrc: str | None = None):
-    """Call fn, passing Spotify isrc when that argument exists."""
-    kwargs = {}
-    if isrc is not None and "isrc" in inspect.signature(fn).parameters:
-        kwargs["isrc"] = isrc
-    return fn(*args, **kwargs)
-
-
 def _accepted_url(url: str | None, score: int) -> str | None:
     """Same drop as _beatport_search: below MIN_FALLBACK_SCORE is no URL."""
     if score < MIN_FALLBACK_SCORE:
@@ -137,10 +140,27 @@ def test_electric_love_yulia_niko_remix_binds_the_beatport_hit_with_mix_name_not
     assert html_url != BEATPORT_SCUZE_ME
 
 
+def test_electric_love_remix_does_not_bind_extended_mix_listed_first() -> None:
+    """Sibling version rows share the remixer as an artist and must not win at 100."""
+    tracks = [ELECTRIC_LOVE_EXTENDED_ROW, ELECTRIC_LOVE_ROW]
+
+    url, score = _best_beatport_track_match(
+        tracks, ELECTRIC_LOVE_TITLE, ELECTRIC_LOVE_ARTISTS,
+    )
+    assert score >= MIN_FALLBACK_SCORE
+    assert url == BEATPORT_ELECTRIC_LOVE_REMIX
+    assert url != "https://www.beatport.com/track/electric-love/29897000"
+
+    html_url, html_score = _parse_beatport_next_data(
+        _search_all_html(tracks), ELECTRIC_LOVE_TITLE, ELECTRIC_LOVE_ARTISTS,
+    )
+    assert html_score >= MIN_FALLBACK_SCORE
+    assert html_url == BEATPORT_ELECTRIC_LOVE_REMIX
+
+
 def test_spotify_isrc_matching_a_beatport_hit_is_accepted_at_100_even_if_titles_differ_slightly() -> None:
     """Matching ISRCs (trim, case-insensitive) accept at 100 before fuzzy title."""
-    url, score = _call_with_isrc(
-        _best_beatport_track_match,
+    url, score = _best_beatport_track_match(
         [ECHO_ISRC_ROW],
         "Echo",
         "Holed Coin",
@@ -149,8 +169,7 @@ def test_spotify_isrc_matching_a_beatport_hit_is_accepted_at_100_even_if_titles_
     assert score == 100
     assert url == "https://www.beatport.com/track/echo/10977073"
 
-    html_url, html_score = _call_with_isrc(
-        _parse_beatport_next_data,
+    html_url, html_score = _parse_beatport_next_data(
         _search_all_html([ECHO_ISRC_ROW]),
         "Echo",
         "Holed Coin",
@@ -162,8 +181,7 @@ def test_spotify_isrc_matching_a_beatport_hit_is_accepted_at_100_even_if_titles_
 
 def test_expiritualmente_style_no_hit_stays_not_found_with_no_wrong_beatport_url() -> None:
     """Unrelated Ledher rows stay under 60, so no Beatport URL is kept."""
-    url, score = _call_with_isrc(
-        _best_beatport_track_match,
+    url, score = _best_beatport_track_match(
         EXPIRITUALMENTE_MISS_ROWS,
         "Expiritualmente",
         "Sebastian Ledher, Jambene",
@@ -172,8 +190,7 @@ def test_expiritualmente_style_no_hit_stays_not_found_with_no_wrong_beatport_url
     assert score < MIN_FALLBACK_SCORE
     assert _accepted_url(url, score) is None
 
-    html_url, html_score = _call_with_isrc(
-        _parse_beatport_next_data,
+    html_url, html_score = _parse_beatport_next_data(
         _search_all_html(EXPIRITUALMENTE_MISS_ROWS),
         "Expiritualmente",
         "Sebastian Ledher, Jambene",
