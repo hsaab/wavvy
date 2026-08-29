@@ -92,16 +92,34 @@ def _store_query(title: str, artist: str) -> StoreQuery:
     return parse_store_query(artist=artist, title=title)
 
 
-def _score_store_row(query: StoreQuery, candidate: StoreCandidate) -> int:
-    """Score a candidate through store_match (title parse only in this slice)."""
+def _title_for_scoring(title: str, mix_name: str | None) -> str:
+    """Attach mix_name in a form ``_split_mix`` understands, without changing parse identity.
+
+    Beatport often stores ``Electric Love`` plus mix_name ``Yulia Niko Remix``. A
+    bare ``Electric Love Yulia Niko Remix`` still parses as no-mix and scores 0.
+    """
+    mix = (mix_name or "").strip()
+    if not mix:
+        return title
+    if mix.lower() in (title or "").lower():
+        return title
+    return f"{title} ({mix})"
+
+
+def _score_store_row(
+    query: StoreQuery,
+    candidate: StoreCandidate,
+    isrc: str | None = None,
+) -> int:
+    """Score a candidate. Fold mix_name into the title before parse, then score."""
     hit = parse_store_hit(
-        title=candidate.title,
+        title=_title_for_scoring(candidate.title, candidate.mix_name),
         artist=candidate.artist,
         url=candidate.url,
         mix_name=candidate.mix_name,
         isrc=candidate.isrc,
     )
-    return score_hit(query, hit)
+    return score_hit(query, hit, isrc=isrc)
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +274,7 @@ def _best_beatport_track_match(
     tracks: list[dict],
     target_title: str,
     target_artist: str,
+    isrc: str | None = None,
 ) -> tuple[str | None, int]:
     """Score each track hit and return the best ``(url, score)`` pair."""
     query = _store_query(target_title, target_artist)
@@ -282,7 +301,7 @@ def _best_beatport_track_match(
             mix_name=t.get("mix_name"),
             isrc=t.get("isrc"),
         )
-        score = _score_store_row(query, candidate)
+        score = _score_store_row(query, candidate, isrc=isrc)
         if score > best_score:
             best_score = score
             best_url = url
@@ -338,6 +357,7 @@ def _parse_beatport_next_data(
     html: str,
     target_title: str,
     target_artist: str,
+    isrc: str | None = None,
 ) -> tuple[str | None, int]:
     """Extract the best Beatport URL from the search page's hydrated payload.
 
@@ -351,7 +371,7 @@ def _parse_beatport_next_data(
 
     tracks = state_data.get("tracks", {}).get("data", []) or []
     track_url, track_score = _best_beatport_track_match(
-        tracks, target_title, target_artist,
+        tracks, target_title, target_artist, isrc=isrc,
     )
     if track_url:
         return track_url, track_score
@@ -420,6 +440,7 @@ async def _beatport_search(
     bp_browser: BeatportBrowser,
     title: str,
     artist: str,
+    isrc: str | None = None,
 ) -> tuple[str | None, int]:
     """Search Beatport for *artist — title*. Returns (url, fuzzy_score).
 
@@ -436,7 +457,7 @@ async def _beatport_search(
     """
     html = await bp_browser.search(title, artist)
 
-    bp_url, score = _parse_beatport_next_data(html, title, artist)
+    bp_url, score = _parse_beatport_next_data(html, title, artist, isrc=isrc)
     if not bp_url:
         bp_url, score = _parse_beatport_html(html, title, artist)
 
@@ -610,6 +631,7 @@ async def resolve_track(
     title = track.get("track_name", "")
     artist = track.get("artist_name", "")
     spotify_id = track.get("spotify_id", "")
+    isrc = track.get("isrc") or None
 
     result: dict = {
         "beatport_url": None,
@@ -642,7 +664,9 @@ async def resolve_track(
         else:
             await asyncio.sleep(SCRAPE_DELAY_SECS)
             try:
-                bp_url, bp_score = await _beatport_search(bp_browser, title, artist)
+                bp_url, bp_score = await _beatport_search(
+                    bp_browser, title, artist, isrc=isrc,
+                )
                 if bp_url:
                     result["beatport_url"] = bp_url
                     best_score = max(best_score, bp_score)

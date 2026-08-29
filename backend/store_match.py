@@ -133,8 +133,19 @@ def build_search_query(query: StoreQuery) -> str:
     return query.title_core
 
 
-def score_hit(query: StoreQuery, hit: StoreHit) -> int:
-    """Score a store hit. Named remixes are a hard gate; originals are a soft preference."""
+def score_hit(
+    query: StoreQuery,
+    hit: StoreHit,
+    isrc: str | None = None,
+) -> int:
+    """Score a store hit. Named remixes are a hard gate; originals are a soft preference.
+
+    A matching Spotify ISRC (trim, case-insensitive) accepts at 100 immediately.
+    ISRC is a result key, not a search query.
+    """
+    if _isrcs_match(isrc, hit.isrc):
+        return 100
+
     mix_confirmed = False
     if query.mix_kind == "remix":
         if _is_original_hit(hit) or _is_no_mix_hit(hit):
@@ -294,3 +305,15 @@ def _artist_score(query: StoreQuery, hit: StoreHit) -> int | None:
     if not query.artists or not performers:
         return None
     return fuzz.token_set_ratio(" ".join(query.artists), " ".join(performers))
+
+
+def _normalize_isrc(value: str | None) -> str:
+    if not value:
+        return ""
+    return value.strip().casefold()
+
+
+def _isrcs_match(left: str | None, right: str | None) -> bool:
+    a = _normalize_isrc(left)
+    b = _normalize_isrc(right)
+    return bool(a) and a == b
