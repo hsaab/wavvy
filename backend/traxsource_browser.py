@@ -37,6 +37,8 @@ from playwright.async_api import (
     async_playwright,
 )
 
+from store_match import build_search_query, parse_store_query
+
 logger = logging.getLogger(__name__)
 
 SEARCH_URL_TEMPLATE = "https://www.traxsource.com/search?term={query}"
@@ -71,6 +73,11 @@ class TraxsourceChallengeError(TraxsourceBrowserError):
     parser would otherwise find no ``.trk-row`` elements and silently report
     "no match" for every track.
     """
+
+
+def _identity_query_text(title: str, artist: str) -> str:
+    """Identity query from raw artist/title. Do not pass a prebuilt query here."""
+    return build_search_query(parse_store_query(artist=artist, title=title))
 
 
 def _is_cloudflare_challenge(page, html: str) -> bool:
@@ -178,7 +185,7 @@ class TraxsourceBrowser:
         report no match.
         """
         context = await self._new_context()
-        query = quote_plus(f"{artist} {title}".strip())
+        query = quote_plus(_identity_query_text(title, artist))
         url = SEARCH_URL_TEMPLATE.format(query=query)
 
         try:
