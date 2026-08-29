@@ -24,6 +24,24 @@ FUZZY_THRESHOLD = 90
 LIBRARY_DUMP_SEPARATOR = "\x1f"
 
 
+def _fuzzy_candidates(entry: LibraryEntry) -> list[str]:
+    """Artist+name strings to score. Empty-artist rows may be Title - Artist."""
+    candidates = [f"{entry.artist} {entry.name}".lower()]
+    if entry.artist.strip() or " - " not in entry.name:
+        return candidates
+    parsed_title, parsed_artist = entry.name.split(" - ", 1)
+    parsed_title = parsed_title.strip()
+    parsed_artist = parsed_artist.strip()
+    if not parsed_title or not parsed_artist:
+        return candidates
+    candidates.append(f"{parsed_artist} {parsed_title}".lower())
+    # Music keeps [Extended] in the title half; Spotify titles often omit it.
+    core_title = parsed_title.split(" [", 1)[0].strip()
+    if core_title and core_title != parsed_title:
+        candidates.append(f"{parsed_artist} {core_title}".lower())
+    return candidates
+
+
 @dataclass
 class LibraryEntry:
     """Normalized representation of a track in the Apple Music library."""
@@ -132,9 +150,9 @@ class ITunesLibraryCache:
             return True
         query = f"{artist} {title}".lower()
         for entry in self._entries:
-            candidate = f"{entry.artist} {entry.name}".lower()
-            if fuzz.token_sort_ratio(query, candidate) >= FUZZY_THRESHOLD:
-                return True
+            for candidate in _fuzzy_candidates(entry):
+                if fuzz.token_sort_ratio(query, candidate) >= FUZZY_THRESHOLD:
+                    return True
         return False
 
     def add_entry(self, artist: str, title: str) -> None:
