@@ -9,11 +9,8 @@ Install the runner (from backend/):
 
 from __future__ import annotations
 
-import inspect
-
 from store_match import (
     StoreHit,
-    StoreQuery,
     build_search_query,
     parse_store_hit,
     parse_store_query,
@@ -39,8 +36,8 @@ GAB_RHOME_ARTISTS = "Gab Rhome, Mark Alow, Armen Miran"
 BOB_FOSSIL_REMIX_TITLE = "Bob Fossil - Armen Miran Remix"
 
 
-def _query(artist: str, title: str):
-    return parse_store_query(artist=artist, title=title)
+def _query(artist: str, title: str, isrc: str | None = None):
+    return parse_store_query(artist=artist, title=title, isrc=isrc)
 
 
 def _hit(title: str, artist: str, url: str) -> StoreHit:
@@ -60,13 +57,6 @@ def _best_url(artist: str, title: str, hits: list[StoreHit]) -> str | None:
     if best_score < ACCEPT_FLOOR:
         return None
     return best_url
-
-
-def _score(query: StoreQuery, hit: StoreHit, isrc: str | None = None) -> int:
-    """Score a hit, passing Spotify isrc when score_hit accepts that argument."""
-    if isrc is not None and "isrc" in inspect.signature(score_hit).parameters:
-        return score_hit(query, hit, isrc=isrc)
-    return score_hit(query, hit)
 
 
 def test_traxsource_bob_fossil_remix_link_is_kept_instead_of_rejected_at_score_49() -> None:
@@ -212,9 +202,9 @@ def test_a_beatport_row_with_mix_name_and_isrc_still_parses_and_keeps_those_fiel
     assert hit.url == BEATPORT_ELECTRIC_LOVE
     assert hit.mix_name == "Yulia Niko Remix"
     assert hit.isrc == "DEA002412345"
-    # mix_name is attached only. Mix identity still comes from the title, not this field.
-    assert hit.mix_label == ""
-    assert hit.mix_kind == "unknown"
+    assert hit.mix_label == "Yulia Niko Remix"
+    assert hit.mix_kind == "remix"
+    assert hit.remixers == ["Yulia Niko"]
 
 
 def test_a_traxsource_row_parses_with_mix_name_and_isrc_as_none() -> None:
@@ -254,7 +244,7 @@ def test_passing_mix_name_and_isrc_does_not_change_the_kigelia_score() -> None:
 
 def test_spotify_isrc_matching_a_beatport_hit_is_accepted_at_100_even_if_titles_differ_slightly() -> None:
     """Matching ISRCs (trim, case-insensitive) accept at 100 before fuzzy title."""
-    query = _query("Holed Coin", "Echo")
+    query = _query("Holed Coin", "Echo", isrc="GB-ECHO-00-00001")
     hit = parse_store_hit(
         title="Echoes",
         artist="Holed Coin",
@@ -262,4 +252,42 @@ def test_spotify_isrc_matching_a_beatport_hit_is_accepted_at_100_even_if_titles_
         isrc="  gb-echo-00-00001  ",
     )
 
-    assert _score(query, hit, isrc="GB-ECHO-00-00001") == 100
+    assert score_hit(query, hit) == 100
+
+
+def test_named_remix_rejects_sibling_version_mixes_that_only_share_the_remixer_as_an_artist() -> None:
+    """Extended / Radio / Club / Dub must not bind as the named remix."""
+    query = _query(
+        "Aiwaska, Starving Yet Full, Yulia Niko",
+        "Electric Love - Yulia Niko Remix",
+    )
+    remix = parse_store_hit(
+        title="Electric Love",
+        artist="Aiwaska, Starving Yet Full, Yulia Niko",
+        url=BEATPORT_ELECTRIC_LOVE,
+        mix_name="Yulia Niko Remix",
+    )
+    assert score_hit(query, remix) >= ACCEPT_FLOOR
+
+    for mix_name in ("Extended Mix", "Radio Edit", "Club Mix", "Dub Mix"):
+        sibling = parse_store_hit(
+            title="Electric Love",
+            artist="Aiwaska, Starving Yet Full, Yulia Niko",
+            url="https://www.beatport.com/track/electric-love/1",
+            mix_name=mix_name,
+        )
+        assert score_hit(query, sibling) == 0, mix_name
+
+    assert _best_url(
+        "Aiwaska, Starving Yet Full, Yulia Niko",
+        "Electric Love - Yulia Niko Remix",
+        [
+            parse_store_hit(
+                title="Electric Love",
+                artist="Aiwaska, Starving Yet Full, Yulia Niko",
+                url="https://www.beatport.com/track/electric-love/1",
+                mix_name="Extended Mix",
+            ),
+            remix,
+        ],
+    ) == remix.url

@@ -49,6 +49,7 @@ class StoreQuery:
     mix_kind: str
     mix_label: str
     remixers: list[str]
+    isrc: str | None = None
 
 
 @dataclass
@@ -58,15 +59,16 @@ class StoreCandidate:
     title: str
     artist: str
     url: str
-    slug: str
-    track_id: str | int | None
-    mix_name: str | None
-    isrc: str | None
+    mix_name: str | None = None
+    isrc: str | None = None
 
 
 @dataclass
 class StoreHit:
-    """Parsed store row. slug_text is title/mix evidence, not artist credits."""
+    """Parsed store row. slug_text is title/mix evidence, not artist credits.
+
+    mix_name and isrc are raw store fields. Mix identity is mix_kind / mix_label.
+    """
 
     title_core: str
     artists: list[str]
@@ -79,7 +81,9 @@ class StoreHit:
     isrc: str | None
 
 
-def parse_store_query(artist: str, title: str) -> StoreQuery:
+def parse_store_query(
+    artist: str, title: str, isrc: str | None = None,
+) -> StoreQuery:
     """Parse source artist/title into core title, artists, and mix identity."""
     title_core, artists, mix_kind, mix_label, remixers = _parse_identity(
         artist or "", title or "",
@@ -90,6 +94,7 @@ def parse_store_query(artist: str, title: str) -> StoreQuery:
         mix_kind=mix_kind,
         mix_label=mix_label,
         remixers=remixers,
+        isrc=isrc,
     )
 
 
@@ -100,17 +105,23 @@ def parse_store_hit(
     mix_name: str | None = None,
     isrc: str | None = None,
 ) -> StoreHit:
-    """Parse a store candidate. Mix may also be recovered from the URL slug."""
+    """Parse a store candidate. Mix may also come from mix_name or the URL slug."""
     title_core, artists, mix_kind, mix_label, remixers = _parse_identity(
         artist or "", title or "",
     )
     slug_text = _slug_text_from_url(url or "")
     if mix_kind == "unknown":
-        slug_mix = _mix_label_from_slug(title_core, slug_text)
-        if slug_mix:
-            mix_label = slug_mix
+        store_mix = (mix_name or "").strip()
+        if store_mix and _MIX_MARKER_RE.search(store_mix):
+            mix_label = store_mix
             mix_kind = _classify_mix(mix_label)
             remixers = _remixers_from_label(mix_label, mix_kind)
+        else:
+            slug_mix = _mix_label_from_slug(title_core, slug_text)
+            if slug_mix:
+                mix_label = slug_mix
+                mix_kind = _classify_mix(mix_label)
+                remixers = _remixers_from_label(mix_label, mix_kind)
     return StoreHit(
         title_core=title_core,
         artists=artists,
@@ -133,17 +144,13 @@ def build_search_query(query: StoreQuery) -> str:
     return query.title_core
 
 
-def score_hit(
-    query: StoreQuery,
-    hit: StoreHit,
-    isrc: str | None = None,
-) -> int:
+def score_hit(query: StoreQuery, hit: StoreHit) -> int:
     """Score a store hit. Named remixes are a hard gate; originals are a soft preference.
 
     A matching Spotify ISRC (trim, case-insensitive) accepts at 100 immediately.
     ISRC is a result key, not a search query.
     """
-    if _isrcs_match(isrc, hit.isrc):
+    if _isrcs_match(query.isrc, hit.isrc):
         return 100
 
     mix_confirmed = False
@@ -156,6 +163,15 @@ def score_hit(
         if not _remixer_overlap(query, hit):
             logger.debug(
                 "Remix gate rejected %s: no remixer overlap", hit.url,
+            )
+            return 0
+        # Extended / Radio / Club / Dub share the remixer as an artist. Those
+        # rows are not the named remix unless the remixer is in the mix fields.
+        if not _is_remix_hit(hit) and not _remixer_overlap(
+            query, hit, include_artists=False,
+        ):
+            logger.debug(
+                "Remix gate rejected %s: generic version mix", hit.url,
             )
             return 0
         mix_confirmed = True
@@ -284,15 +300,21 @@ def _is_no_mix_hit(hit: StoreHit) -> bool:
     return not _is_remix_hit(hit) and not _is_original_hit(hit) and not hit.mix_label
 
 
-def _remixer_overlap(query: StoreQuery, hit: StoreHit) -> bool:
+def _remixer_overlap(
+    query: StoreQuery,
+    hit: StoreHit,
+    *,
+    include_artists: bool = True,
+) -> bool:
     if not query.remixers:
         return False
     haystacks = [
         *hit.remixers,
-        *hit.artists,
         hit.mix_label,
         hit.slug_text.replace("-", " "),
     ]
+    if include_artists:
+        haystacks.extend(hit.artists)
     for remixer in query.remixers:
         for hay in haystacks:
             if hay and fuzz.partial_ratio(remixer, hay) >= REMIXER_OVERLAP:
