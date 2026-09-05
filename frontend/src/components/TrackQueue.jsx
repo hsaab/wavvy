@@ -389,25 +389,10 @@ export default function TrackQueue({ wsMessage }) {
             label="Open BP Links"
           />
           <ActionBtn
-            color="cyan"
-            onClick={() => openApprovedLinks("traxsource")}
-            label="Open TS Links"
-          />
-          <ActionBtn
             color="orange"
             onClick={() => handleBuildCart("beatport")}
             label={cartButtonLabel({
               store: "beatport",
-              cartStarting,
-              isCartRunning,
-            })}
-            disabled={cartButtonDisabled({ cartStarting, isCartRunning })}
-          />
-          <ActionBtn
-            color="cyan"
-            onClick={() => handleBuildCart("traxsource")}
-            label={cartButtonLabel({
-              store: "traxsource",
               cartStarting,
               isCartRunning,
             })}

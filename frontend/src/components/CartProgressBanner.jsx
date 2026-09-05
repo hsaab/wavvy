@@ -1,9 +1,8 @@
 import { useMemo } from "react";
 
-const STORE_LABELS = { beatport: "Beatport", traxsource: "Traxsource" };
+const STORE_LABELS = { beatport: "Beatport" };
 const STORE_COLORS = {
   beatport: { bar: "bg-orange-500", text: "text-orange-400", bg: "bg-orange-500/10", border: "border-orange-500/20" },
-  traxsource: { bar: "bg-cyan-500", text: "text-cyan-400", bg: "bg-cyan-500/10", border: "border-cyan-500/20" },
 };
 
 export default function CartProgressBanner({ cartState }) {

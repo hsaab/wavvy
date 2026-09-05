@@ -107,17 +107,6 @@ export default function TrackRow({
           ) : (
             <span className="text-xs text-gray-600">--</span>
           )}
-          {track.traxsource_url ? (
-            <button
-              onClick={() => openLink(track.traxsource_url)}
-              className="text-xs px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-400
-                         hover:bg-cyan-500/30 transition-colors"
-            >
-              TS
-            </button>
-          ) : (
-            <span className="text-xs text-gray-600">--</span>
-          )}
         </div>
       </td>
 
