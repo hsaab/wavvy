@@ -10,6 +10,8 @@ Install the runner (from backend/):
 from __future__ import annotations
 
 import asyncio
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
 from beatport_browser import BeatportBrowser
@@ -94,3 +96,31 @@ def test_electric_love_remix_beatport_search_uses_the_song_and_the_remixer() -> 
     assert "Aiwaska" not in q
     assert "Starving Yet Full" not in q
     assert q != f"{ELECTRIC_LOVE_ARTISTS} {ELECTRIC_LOVE_TITLE}"
+
+
+def _beatport_chromium_launch_kwargs() -> dict[str, Any]:
+    """Stub Playwright and return Beatport chromium.launch kwargs."""
+    pw = MagicMock()
+    pw.chromium.launch = AsyncMock(return_value=MagicMock())
+    starter = MagicMock()
+    starter.start = AsyncMock(return_value=pw)
+
+    async def _run() -> None:
+        await BeatportBrowser()._ensure_browser()
+
+    with patch("beatport_browser.async_playwright", return_value=starter):
+        asyncio.run(_run())
+
+    call = pw.chromium.launch.call_args
+    assert call is not None, "Resolve Links Beatport scrape never launched Chromium"
+    return call.kwargs
+
+
+def test_resolve_links_beatport_scrape_launches_headed_chromium_not_headless_shell() -> None:
+    """Resolve Links Beatport scrape must use headed Chromium, not chromium_headless_shell."""
+    launch_kwargs = _beatport_chromium_launch_kwargs()
+    assert launch_kwargs.get("headless") is False, (
+        "Resolve Links Beatport scrape must launch headed Chromium "
+        "(headless=False); headless=True looks for chromium_headless_shell, "
+        "which failed the live 10:55 Resolve Links run"
+    )
