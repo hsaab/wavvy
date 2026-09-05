@@ -155,10 +155,6 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _ResolveHarness:
             raise h.bp_search_error
         return h.bp_html
 
-    async def fake_ts_search(_self: object, title: str, artist: str) -> str:
-        h.ts_searches.append((title, artist))
-        return h.ts_html
-
     monkeypatch.setattr("link_resolver.get_supabase", lambda: _FakeSupabase(h))
     monkeypatch.setattr("link_resolver.update_track_fields", fake_update)
     monkeypatch.setattr("link_resolver.manager.broadcast", AsyncMock())
@@ -166,7 +162,6 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _ResolveHarness:
     # and so the fixture does not require link_resolver to keep importing httpx.
     monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: h.httpx_client)
     monkeypatch.setattr("link_resolver.BeatportBrowser.search", fake_bp_search)
-    monkeypatch.setattr("link_resolver.TraxsourceBrowser.search", fake_ts_search)
     monkeypatch.setattr("link_resolver.SCRAPE_DELAY_SECS", 0)
     if hasattr(link_resolver_mod, "_odesli_throttle"):
         monkeypatch.setattr(link_resolver_mod, "_odesli_throttle", AsyncMock())
@@ -341,4 +336,14 @@ def test_unscoped_resolve_does_not_select_tracks_that_only_lack_traxsource_url(
     assert beatport_null, (
         "unscoped fetch must still require beatport_url null; "
         f"got {query.filters}"
+    )
+
+
+def test_link_resolver_does_not_expose_traxsource_search_helpers() -> None:
+    """Dead Traxsource resolve helpers must be gone so they cannot come back."""
+    assert not hasattr(link_resolver_mod, "TraxsourceBrowser"), (
+        "link_resolver must not expose TraxsourceBrowser"
+    )
+    assert not hasattr(link_resolver_mod, "_traxsource_search"), (
+        "link_resolver must not expose _traxsource_search"
     )
