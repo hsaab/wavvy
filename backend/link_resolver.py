@@ -28,7 +28,6 @@ from store_match import (
     parse_store_query,
     score_hit,
 )
-from traxsource_browser import TraxsourceBrowser, TraxsourceBrowserError
 from ws_manager import manager
 
 # Statuses whose tracks still benefit from (re-)resolution. Anything past
@@ -325,127 +324,6 @@ async def _beatport_search(
         return None, 0
 
     return bp_url, score
-
-
-# ---------------------------------------------------------------------------
-# Traxsource search
-# ---------------------------------------------------------------------------
-
-def _absolutize_traxsource(href: str) -> str:
-    """Turn a relative Traxsource href into an absolute URL."""
-    return href if href.startswith("http") else f"https://www.traxsource.com{href}"
-
-
-def _parse_traxsource_html(
-    html: str,
-    query: StoreQuery,
-) -> tuple[str | None, int]:
-    """Extract the best Traxsource track URL from a search-results page.
-
-    Tries structured ``.trk-row`` rows first (title + artist cells, the
-    reliable path), then falls back to scanning generic ``/track/`` and
-    ``/title/`` anchors with whatever artist context is nearby. Slug text
-    from the URL is title and mix evidence; it is never treated as artist
-    credits.
-    """
-    soup = BeautifulSoup(html, "html.parser")
-    best_url: str | None = None
-    best_score = 0
-    best_rejected_score = 0
-    best_rejected_reason = "no candidates"
-    best_rejected_url: str | None = None
-
-    def consider(title: str, artist: str, href: str) -> None:
-        nonlocal best_url, best_score
-        nonlocal best_rejected_score, best_rejected_reason, best_rejected_url
-        if not href:
-            return
-        url = _absolutize_traxsource(href)
-        candidate = StoreCandidate(title=title, artist=artist, url=url)
-        score = _score_store_row(query, candidate)
-        if score >= MIN_FALLBACK_SCORE and score > best_score:
-            best_score = score
-            best_url = url
-            return
-        if score > best_rejected_score:
-            best_rejected_score = score
-            best_rejected_url = url
-            if score == 0:
-                best_rejected_reason = "remix gate or incompatible mix"
-            else:
-                best_rejected_reason = "below floor"
-
-    # Preferred: structured track rows with separate title + artist cells.
-    for row in soup.select(".trk-row, .search-trk-row")[:15]:
-        title_el = row.select_one(".trk-cell.title a, .title a")
-        if not title_el:
-            continue
-        artist_el = row.select_one(
-            ".trk-cell.artists a, .artists a, a[href*='/artist/']"
-        )
-        row_title = title_el.get_text(" ", strip=True)
-        row_artist = artist_el.get_text(" ", strip=True) if artist_el else ""
-        consider(row_title, row_artist, title_el.get("href", ""))
-
-    if best_url:
-        return best_url, best_score
-
-    # Fallback: generic track links without structured row context.
-    for link in soup.select("a[href*='/track/'], a[href*='/title/']")[:15]:
-        text = link.get_text(" ", strip=True)
-        if not text:
-            continue
-
-        link_artist = ""
-        parent = link.find_parent(["div", "li", "tr"])
-        if parent:
-            artist_el = parent.select_one("a[href*='/artist/']")
-            if artist_el:
-                link_artist = artist_el.get_text(" ", strip=True)
-
-        consider(text, link_artist, link.get("href", ""))
-
-    if not best_url:
-        logger.info(
-            "Traxsource best rejected score %d (%s) for candidate %s",
-            best_rejected_score, best_rejected_reason, best_rejected_url,
-        )
-        return None, 0
-
-    return best_url, best_score
-
-
-async def _traxsource_search(
-    ts_browser: TraxsourceBrowser,
-    title: str,
-    artist: str,
-) -> tuple[str | None, int]:
-    """Search Traxsource for *artist — title*. Returns (url, fuzzy_score).
-
-    Fetches the search page through a real Chromium session (``ts_browser``)
-    because Traxsource now sits behind Cloudflare's JS challenge — plain
-    HTTP requests receive a 403 interstitial. Callers own the
-    :class:`TraxsourceBrowser` lifecycle (one per batch).
-
-    Matches below :data:`MIN_FALLBACK_SCORE` are dropped in favor of
-    reporting ``not_found``. Raises :class:`TraxsourceBrowserError` on a
-    browser/session failure; the caller decides how to handle it.
-    """
-    html = await ts_browser.search(title, artist)
-
-    ts_url, score = _parse_traxsource_html(
-        html, parse_store_query(artist=artist, title=title),
-    )
-
-    if ts_url and score < MIN_FALLBACK_SCORE:
-        logger.info(
-            "Traxsource fallback rejected for '%s - %s': best score %d "
-            "below floor %d (candidate: %s)",
-            artist, title, score, MIN_FALLBACK_SCORE, ts_url,
-        )
-        return None, 0
-
-    return ts_url, score
 
 
 # ---------------------------------------------------------------------------
