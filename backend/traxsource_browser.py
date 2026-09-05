@@ -111,7 +111,7 @@ class TraxsourceBrowser:
 
         self._pw = await async_playwright().start()
         try:
-            self._browser = await self._pw.chromium.launch(headless=True)
+            self._browser = await self._pw.chromium.launch(headless=False)
         except Exception as exc:
             await self.close()
             raise TraxsourceBrowserError(
