@@ -1,10 +1,10 @@
-"""Slice 4 resolve journeys: Odesli 401 degrade and Expiritualmente persist.
+"""Slice 2 resolve journeys: skip song.link, persist scrape hits, keep the batch going.
 
 These tests never hit api.song.link, Beatport, Traxsource, or Playwright.
 They drive resolve_tracks with httpx and store search mocked.
 
 Install the runner (from backend/):
-    /Users/hassansaab/apps/wavvy/.venv/bin/pytest tests/test_resolve_track.py
+    ../.venv/bin/pytest tests/test_resolve_track.py
 """
 
 from __future__ import annotations
@@ -17,8 +17,17 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
+import link_resolver as link_resolver_mod
+from beatport_browser import BeatportBrowserError
 from link_resolver import resolve_tracks
-from test_link_resolver import EXPIRITUALMENTE_MISS_ROWS, _search_all_html
+from test_link_resolver import (
+    BEATPORT_ELECTRIC_LOVE_REMIX,
+    ELECTRIC_LOVE_ARTISTS,
+    ELECTRIC_LOVE_ROW,
+    ELECTRIC_LOVE_TITLE,
+    EXPIRITUALMENTE_MISS_ROWS,
+    _search_all_html,
+)
 
 EXPIRITUALMENTE_ARTISTS = "Sebastian Ledher, Jambene"
 EXPIRITUALMENTE_TITLE = "Expiritualmente"
@@ -65,13 +74,13 @@ class _FakeSupabase:
         return _TracksQuery(self._rows)
 
 
-class _FakeOdesliClient:
-    """AsyncClient stand-in: every request is an Odesli 401. No network."""
+class _RecordingHttpxClient:
+    """AsyncClient stand-in that records URLs and never touches the network."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self.requests: list[tuple[str, str]] = []
 
-    async def __aenter__(self) -> _FakeOdesliClient:
+    async def __aenter__(self) -> _RecordingHttpxClient:
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
@@ -84,7 +93,7 @@ class _FakeOdesliClient:
 
 
 class _ResolveHarness:
-    """In-memory stand-ins for Supabase, Odesli httpx, and store browsers."""
+    """In-memory stand-ins for Supabase, httpx, and store browsers."""
 
     def __init__(self) -> None:
         self.tracks: list[dict[str, Any]] = []
@@ -93,12 +102,17 @@ class _ResolveHarness:
         self.ts_searches: list[tuple[str, str]] = []
         self.bp_html = _search_all_html([])
         self.ts_html = "<html></html>"
-        self.odesli = _FakeOdesliClient()
+        self.httpx_client = _RecordingHttpxClient()
+        self.bp_search_error: Exception | None = None
 
     def update_for(self, track_id: int) -> dict[str, Any]:
         matches = [fields for tid, fields in self.updates if tid == track_id]
         assert matches, f"expected persist for track {track_id}, got {self.updates}"
         return matches[0]
+
+    def song_link_urls(self) -> list[str]:
+        """URLs that went to song.link, if any."""
+        return [url for _, url in self.httpx_client.requests if "song.link" in url]
 
     def run(self, track_ids: list[int]) -> dict[str, Any]:
         return asyncio.run(resolve_tracks(track_ids))
@@ -115,6 +129,8 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _ResolveHarness:
 
     async def fake_bp_search(_self: object, title: str, artist: str) -> str:
         h.bp_searches.append((title, artist))
+        if h.bp_search_error is not None:
+            raise h.bp_search_error
         return h.bp_html
 
     async def fake_ts_search(_self: object, title: str, artist: str) -> str:
@@ -124,18 +140,21 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _ResolveHarness:
     monkeypatch.setattr("link_resolver.get_supabase", lambda: _FakeSupabase(h.tracks))
     monkeypatch.setattr("link_resolver.update_track_fields", fake_update)
     monkeypatch.setattr("link_resolver.manager.broadcast", AsyncMock())
-    monkeypatch.setattr("link_resolver.httpx.AsyncClient", lambda *a, **k: h.odesli)
+    # Patch the httpx module so a leftover Odesli client is still recorded,
+    # and so the fixture does not require link_resolver to keep importing httpx.
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: h.httpx_client)
     monkeypatch.setattr("link_resolver.BeatportBrowser.search", fake_bp_search)
     monkeypatch.setattr("link_resolver.TraxsourceBrowser.search", fake_ts_search)
     monkeypatch.setattr("link_resolver.SCRAPE_DELAY_SECS", 0)
-    monkeypatch.setattr("link_resolver._odesli_throttle", AsyncMock())
+    if hasattr(link_resolver_mod, "_odesli_throttle"):
+        monkeypatch.setattr(link_resolver_mod, "_odesli_throttle", AsyncMock())
     return h
 
 
-def test_odesli_401_still_reaches_scrape_and_does_not_abort_the_batch(
+def test_resolve_links_does_not_request_song_link_and_still_scrapes_the_batch(
     harness: _ResolveHarness,
 ) -> None:
-    """A 401 from Odesli still scrapes both tracks; the batch keeps going."""
+    """Resolve Links scrapes both tracks and does not ask song.link."""
     first = _track(
         11,
         name="Electric Love - Yulia Niko Remix",
@@ -154,8 +173,11 @@ def test_odesli_401_still_reaches_scrape_and_does_not_abort_the_batch(
 
     summary = harness.run([11, 12])
 
-    assert harness.odesli.requests, "Odesli was never called"
-    assert all("song.link" in url for _, url in harness.odesli.requests)
+    song_link_urls = harness.song_link_urls()
+    assert song_link_urls == [], (
+        "Resolve Links must not request song.link; "
+        f"got {song_link_urls}"
+    )
 
     scraped_titles = [title for title, _artist in harness.bp_searches]
     assert first["track_name"] in scraped_titles
@@ -167,6 +189,31 @@ def test_odesli_401_still_reaches_scrape_and_does_not_abort_the_batch(
     assert summary.get("batch_error") in (None, "")
     assert {row["track_id"] for row in summary["results"]} == {11, 12}
     assert {tid for tid, _fields in harness.updates} == {11, 12}
+
+
+def test_scrape_found_electric_love_beatport_url_is_persisted(
+    harness: _ResolveHarness,
+) -> None:
+    """A Beatport hit for Electric Love (Yulia Niko Remix) is written to the track."""
+    track = _track(
+        31,
+        name=ELECTRIC_LOVE_TITLE,
+        artist=ELECTRIC_LOVE_ARTISTS,
+        spotify_id="sp_electric_love",
+        isrc=ELECTRIC_LOVE_ROW["isrc"],
+    )
+    harness.tracks = [track]
+    harness.bp_html = _search_all_html([ELECTRIC_LOVE_ROW])
+
+    summary = harness.run([31])
+
+    persisted = harness.update_for(31)
+    assert persisted["beatport_url"] == BEATPORT_ELECTRIC_LOVE_REMIX
+    assert persisted["match_confidence"] != "not_found"
+
+    result = summary["results"][0]
+    assert result["beatport_url"] == BEATPORT_ELECTRIC_LOVE_REMIX
+    assert summary.get("batch_error") in (None, "")
 
 
 def test_expiritualmente_style_no_hit_persists_not_found_with_no_beatport_url(
@@ -198,3 +245,34 @@ def test_expiritualmente_style_no_hit_persists_not_found_with_no_beatport_url(
     assert result["match_confidence"] == "not_found"
     assert result.get("beatport_url") in (None, "")
     assert summary.get("batch_error") in (None, "")
+
+
+def test_batch_still_continues_when_beatport_search_fails(
+    harness: _ResolveHarness,
+) -> None:
+    """A dead Beatport session does not stop the next track from resolving."""
+    first = _track(
+        41,
+        name="Electric Love - Yulia Niko Remix",
+        artist="Aiwaska, Starving Yet Full, Yulia Niko",
+        spotify_id="sp_electric_love",
+        isrc="DEA002412345",
+    )
+    second = _track(
+        42,
+        name="Echo",
+        artist="Holed Coin",
+        spotify_id="sp_echo",
+        isrc="GBECHO0000001",
+    )
+    harness.tracks = [first, second]
+    harness.bp_search_error = BeatportBrowserError("Failed to launch Chromium")
+
+    summary = harness.run([41, 42])
+
+    assert {row["track_id"] for row in summary["results"]} == {41, 42}
+    assert summary.get("batch_error") not in (None, "")
+
+    persisted = harness.update_for(42)
+    assert persisted["match_confidence"]
+    assert any(title == second["track_name"] for title, _artist in harness.ts_searches)
