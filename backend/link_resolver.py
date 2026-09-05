@@ -1,9 +1,8 @@
 """Link resolver: finds Beatport and Traxsource URLs for Spotify tracks.
 
 Resolution strategy (per track):
-  1. Odesli API — direct platform link mapping from a Spotify URL.
-  2. Beatport search fallback — scrape search results, fuzzy-match.
-  3. Traxsource search fallback — same pattern, different selectors.
+  1. Beatport search — scrape search results, fuzzy-match.
+  2. Traxsource search — same pattern, different selectors.
 
 Each result gets a confidence score:
   high   (>= 90)  — almost certainly the same track
@@ -19,7 +18,6 @@ import json
 import logging
 import re
 
-import httpx
 from bs4 import BeautifulSoup
 
 from beatport_browser import BeatportBrowser, BeatportBrowserError
@@ -45,23 +43,11 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-ODESLI_API = "https://api.song.link/v1-alpha.1/links"
-
-# Odesli's free tier rate-limits aggressively (HTTP 429). We enforce a global
-# minimum spacing between calls and honor ``Retry-After`` so a single batch
-# doesn't stampede the endpoint. The previous implementation retried within
-# milliseconds, which burned the rate budget and produced a 429 on nearly
-# every track.
-ODESLI_MIN_INTERVAL_SECS = 2.0
-ODESLI_MAX_RETRIES = 2
-ODESLI_MAX_BACKOFF_SECS = 20.0
-
 HIGH_CONFIDENCE = 90
 MEDIUM_CONFIDENCE = 75
-# Floor for *fallback* matches (Beatport / Traxsource scraping). Anything
-# below this is almost certainly a wrong match — e.g. a promoted track from
-# a homepage fallback — so we drop it rather than persist a misleading link.
-# Odesli matches are unaffected and keep their 100-baseline.
+# Floor for store-scrape matches (Beatport / Traxsource). Anything below
+# this is almost certainly a wrong match — e.g. a promoted track from a
+# homepage fallback — so we drop it rather than persist a misleading link.
 MIN_FALLBACK_SCORE = 60
 SCRAPE_DELAY_SECS = 1.5
 
@@ -107,103 +93,7 @@ def _score_store_row(query: StoreQuery, candidate: StoreCandidate) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Odesli (song.link) lookup
-# ---------------------------------------------------------------------------
-
-# Global throttle state shared across the batch. The resolver runs one track
-# at a time on a single event loop, so a lock plus a last-call timestamp is
-# enough to guarantee a minimum spacing between Odesli requests.
-_odesli_throttle_lock = asyncio.Lock()
-_odesli_last_call_at = 0.0
-
-
-async def _odesli_throttle() -> None:
-    """Block until at least :data:`ODESLI_MIN_INTERVAL_SECS` has elapsed
-    since the previous Odesli request."""
-    global _odesli_last_call_at
-    async with _odesli_throttle_lock:
-        loop = asyncio.get_event_loop()
-        elapsed = loop.time() - _odesli_last_call_at
-        if elapsed < ODESLI_MIN_INTERVAL_SECS:
-            await asyncio.sleep(ODESLI_MIN_INTERVAL_SECS - elapsed)
-        _odesli_last_call_at = loop.time()
-
-
-def _retry_after_seconds(resp: httpx.Response) -> float | None:
-    """Parse a ``Retry-After`` header in delta-seconds form, if present."""
-    raw = resp.headers.get("Retry-After")
-    if not raw:
-        return None
-    try:
-        return float(raw)
-    except ValueError:
-        return None
-
-
-async def _odesli_lookup(
-    client: httpx.AsyncClient,
-    spotify_id: str,
-) -> dict[str, str]:
-    """Query Odesli for Beatport / Traxsource URLs from a Spotify track ID.
-
-    Returns a dict that may contain ``beatport_url`` and/or ``traxsource_url``.
-    Honors ``Retry-After`` on 429 and gives up gracefully after a few
-    attempts so the scraping fallbacks can take over rather than stalling
-    the whole batch.
-    """
-    spotify_url = f"https://open.spotify.com/track/{spotify_id}"
-    params = {"url": spotify_url, "userCountry": "US"}
-
-    for attempt in range(ODESLI_MAX_RETRIES + 1):
-        await _odesli_throttle()
-        try:
-            resp = await client.request(
-                "GET", ODESLI_API, params=params, timeout=15.0,
-            )
-        except httpx.RequestError as exc:
-            logger.warning("Odesli request error for %s: %s", spotify_id, exc)
-            return {}
-
-        if resp.status_code == 429:
-            if attempt >= ODESLI_MAX_RETRIES:
-                logger.warning(
-                    "Odesli rate-limited for %s after %d attempt(s); "
-                    "falling back to scraping", spotify_id, attempt + 1,
-                )
-                return {}
-            backoff = _retry_after_seconds(resp) or (2.0**attempt) * ODESLI_MIN_INTERVAL_SECS
-            backoff = min(backoff, ODESLI_MAX_BACKOFF_SECS)
-            logger.info(
-                "Odesli 429 for %s; backing off %.1fs (retry %d/%d)",
-                spotify_id, backoff, attempt + 1, ODESLI_MAX_RETRIES,
-            )
-            await asyncio.sleep(backoff)
-            continue
-
-        try:
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            logger.warning("Odesli lookup failed for %s: %s", spotify_id, exc)
-            return {}
-
-        try:
-            platforms = resp.json().get("linksByPlatform", {})
-        except ValueError as exc:
-            logger.warning("Odesli returned non-JSON for %s: %s", spotify_id, exc)
-            return {}
-
-        links: dict[str, str] = {}
-        if "beatport" in platforms:
-            links["beatport_url"] = platforms["beatport"]["url"]
-        if "traxsource" in platforms:
-            links["traxsource_url"] = platforms["traxsource"]["url"]
-        return links
-
-    return {}
-
-
-# ---------------------------------------------------------------------------
-# Beatport search fallback
+# Beatport search
 # ---------------------------------------------------------------------------
 
 def _slug_from_name(name: str) -> str:
@@ -439,7 +329,7 @@ async def _beatport_search(
 
 
 # ---------------------------------------------------------------------------
-# Traxsource search fallback
+# Traxsource search
 # ---------------------------------------------------------------------------
 
 def _absolutize_traxsource(href: str) -> str:
@@ -565,7 +455,6 @@ async def _traxsource_search(
 
 async def resolve_track(
     track: dict,
-    client: httpx.AsyncClient,
     bp_browser: BeatportBrowser | None = None,
     ts_browser: TraxsourceBrowser | None = None,
 ) -> dict:
@@ -581,14 +470,12 @@ async def resolve_track(
             "errors":             list[str]   # per-source failures, user-facing
         }
 
-    ``bp_browser`` / ``ts_browser`` must be provided to enable the Beatport /
-    Traxsource fallbacks respectively; without them, only Odesli can supply
-    those links. Callers construct one browser of each per batch and share
-    them across tracks.
+    ``bp_browser`` / ``ts_browser`` must be provided to enable Beatport /
+    Traxsource search respectively. Callers construct one browser of each
+    per batch and share them across tracks.
     """
     title = track.get("track_name", "")
     artist = track.get("artist_name", "")
-    spotify_id = track.get("spotify_id", "")
     isrc = track.get("isrc") or None
 
     result: dict = {
@@ -599,24 +486,10 @@ async def resolve_track(
         "errors": [],
     }
 
-    # --- Step 1: Odesli direct lookup ---
-    if spotify_id:
-        odesli = await _odesli_lookup(client, spotify_id)
-        result["beatport_url"] = odesli.get("beatport_url")
-        result["traxsource_url"] = odesli.get("traxsource_url")
+    best_score = 0
 
-    # Both links found via Odesli — highest confidence
-    if result["beatport_url"] and result["traxsource_url"]:
-        result["match_confidence"] = "high"
-        result["confidence_score"] = 100
-        return result
-
-    # Track the best fuzzy score across fallbacks
-    # If Odesli gave one link, start from a 100-baseline for that link
-    best_score = 100 if (result["beatport_url"] or result["traxsource_url"]) else 0
-
-    # --- Step 2: Beatport scraping fallback (via Playwright) ---
-    if not result["beatport_url"] and title and artist:
+    # --- Beatport scraping (via Playwright) ---
+    if title and artist:
         if bp_browser is None:
             result["errors"].append("beatport: browser session unavailable")
         else:
@@ -643,8 +516,8 @@ async def resolve_track(
                 )
                 result["errors"].append(f"beatport: {exc}")
 
-    # --- Step 3: Traxsource scraping fallback (via Playwright) ---
-    if not result["traxsource_url"] and title and artist:
+    # --- Traxsource scraping (via Playwright) ---
+    if title and artist:
         if ts_browser is None:
             result["errors"].append("traxsource: browser session unavailable")
         else:
@@ -701,10 +574,10 @@ def _fetch_tracks_needing_resolution() -> list[dict]:
 
 # Single-flight guard. Two callers can fire the auto-resolve background task
 # nearly simultaneously (e.g. /api/scan and a playlist sync), which previously
-# doubled every outbound request and tipped Odesli over its rate limit. A
-# duplicate *auto* batch (track_ids is None) is skipped outright; explicit
-# track_id batches serialize on the lock so their specific tracks still get
-# resolved once the running batch finishes.
+# doubled every outbound store search. A duplicate *auto* batch
+# (track_ids is None) is skipped outright; explicit track_id batches
+# serialize on the lock so their specific tracks still get resolved once
+# the running batch finishes.
 _resolve_lock = asyncio.Lock()
 
 
@@ -764,79 +637,77 @@ async def _run_resolve_batch(track_ids: list[int] | None = None) -> dict:
     bp_browser = BeatportBrowser()
     ts_browser = TraxsourceBrowser()
     try:
-        async with httpx.AsyncClient() as client:
-            for idx, track in enumerate(tracks, start=1):
-                track_id = track["id"]
-                label = (
-                    f"{track.get('artist_name', '?')} — "
-                    f"{track.get('track_name', '?')}"
+        for idx, track in enumerate(tracks, start=1):
+            track_id = track["id"]
+            label = (
+                f"{track.get('artist_name', '?')} — "
+                f"{track.get('track_name', '?')}"
+            )
+
+            logger.info("Resolving [%d/%d]: %s", idx, total, label)
+            await manager.broadcast("resolve_progress", {
+                "current": idx,
+                "total": total,
+                "track_id": track_id,
+                "message": f"Resolving {label}…",
+            })
+
+            try:
+                resolved = await resolve_track(
+                    track,
+                    bp_browser if not batch_error else None,
+                    ts_browser,
                 )
 
-                logger.info("Resolving [%d/%d]: %s", idx, total, label)
-                await manager.broadcast("resolve_progress", {
-                    "current": idx,
-                    "total": total,
-                    "track_id": track_id,
-                    "message": f"Resolving {label}…",
-                })
+                update_payload: dict = {
+                    "match_confidence": resolved["match_confidence"],
+                    "confidence_score": resolved["confidence_score"],
+                }
+                if resolved["beatport_url"]:
+                    update_payload["beatport_url"] = resolved["beatport_url"]
+                if resolved["traxsource_url"]:
+                    update_payload["traxsource_url"] = resolved["traxsource_url"]
 
-                try:
-                    resolved = await resolve_track(
-                        track,
-                        client,
-                        bp_browser if not batch_error else None,
-                        ts_browser,
-                    )
+                update_track_fields(track_id, update_payload)
 
-                    update_payload: dict = {
-                        "match_confidence": resolved["match_confidence"],
-                        "confidence_score": resolved["confidence_score"],
-                    }
-                    if resolved["beatport_url"]:
-                        update_payload["beatport_url"] = resolved["beatport_url"]
-                    if resolved["traxsource_url"]:
-                        update_payload["traxsource_url"] = resolved["traxsource_url"]
+                results.append({"track_id": track_id, "label": label, **resolved})
 
-                    update_track_fields(track_id, update_payload)
-
-                    results.append({"track_id": track_id, "label": label, **resolved})
-
-                    if resolved.get("errors"):
-                        await manager.broadcast("resolve_error", {
-                            "track_id": track_id,
-                            "label": label,
-                            "errors": resolved["errors"],
-                        })
-
-                except BeatportBrowserError as exc:
-                    # Browser died mid-batch — stop using it for the rest of the
-                    # tracks but keep going so Odesli/Traxsource results still land.
-                    batch_error = (
-                        f"Beatport browser session failed: {exc}. "
-                        f"Remaining tracks skipped Beatport fallback."
-                    )
-                    logger.error(batch_error)
-                    results.append({
-                        "track_id": track_id,
-                        "label": label,
-                        "error": str(exc),
-                        "match_confidence": "not_found",
-                        "errors": [f"beatport: {exc}"],
-                    })
+                if resolved.get("errors"):
                     await manager.broadcast("resolve_error", {
                         "track_id": track_id,
                         "label": label,
-                        "batch_error": batch_error,
+                        "errors": resolved["errors"],
                     })
-                except Exception as exc:
-                    logger.error("Resolve failed for %s: %s", label, exc)
-                    results.append({
-                        "track_id": track_id,
-                        "label": label,
-                        "error": str(exc),
-                        "match_confidence": "not_found",
-                        "errors": [str(exc)],
-                    })
+
+            except BeatportBrowserError as exc:
+                # Browser died mid-batch — stop using it for the rest of the
+                # tracks but keep going so Traxsource results still land.
+                batch_error = (
+                    f"Beatport browser session failed: {exc}. "
+                    f"Remaining tracks skipped Beatport fallback."
+                )
+                logger.error(batch_error)
+                results.append({
+                    "track_id": track_id,
+                    "label": label,
+                    "error": str(exc),
+                    "match_confidence": "not_found",
+                    "errors": [f"beatport: {exc}"],
+                })
+                await manager.broadcast("resolve_error", {
+                    "track_id": track_id,
+                    "label": label,
+                    "batch_error": batch_error,
+                })
+            except Exception as exc:
+                logger.error("Resolve failed for %s: %s", label, exc)
+                results.append({
+                    "track_id": track_id,
+                    "label": label,
+                    "error": str(exc),
+                    "match_confidence": "not_found",
+                    "errors": [str(exc)],
+                })
     finally:
         await bp_browser.close()
         await ts_browser.close()
