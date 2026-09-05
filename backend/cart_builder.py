@@ -1,4 +1,4 @@
-"""Playwright-based cart builder for Beatport and Traxsource.
+"""Playwright-based cart builder for Beatport.
 
 Launches headed Google Chrome with a dedicated profile, waits for you to
 log in (Beatport), then adds approved WAV tracks to the cart. Failures are
@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Any, Literal
@@ -38,19 +37,8 @@ from store_selectors import (
     BP_WAV_OPTION,
     BP_ADD_TO_CART,
     BP_COOKIE_ACCEPT,
-    TRAXSOURCE_BASE_URL,
-    TRAXSOURCE_LOGIN_URL,
-    TRAXSOURCE_CART_URL,
-    TS_EMAIL_INPUT,
-    TS_PASSWORD_INPUT,
-    TS_LOGIN_BUTTON,
-    TS_LOGGED_IN_INDICATOR,
-    TS_WAV_BUY_BUTTON,
-    TS_ADD_TO_CART,
-    TS_COOKIE_ACCEPT,
     NAV_TIMEOUT_MS,
     ACTION_DELAY_SEC,
-    LOGIN_WAIT_SEC,
     PAGE_LOAD_WAIT_SEC,
     MANUAL_LOGIN_TIMEOUT_MS,
 )
@@ -62,9 +50,9 @@ _HIDE_WEBDRIVER = (
     "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
 )
 
-Store = Literal["beatport", "traxsource"]
+Store = Literal["beatport"]
 
-_running: dict[str, bool] = {"beatport": False, "traxsource": False}
+_running: dict[str, bool] = {"beatport": False}
 
 # FastAPI loop, captured on the app thread before Playwright runs in to_thread.
 _loop: asyncio.AbstractEventLoop | None = None
@@ -239,75 +227,6 @@ def _beatport_add_track(page: Page, track: dict[str, Any]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Traxsource automation
-# ---------------------------------------------------------------------------
-
-def _traxsource_login(page: Page) -> bool:
-    """Log in to Traxsource using .env credentials."""
-    email = os.environ.get("TRAXSOURCE_EMAIL", "")
-    password = os.environ.get("TRAXSOURCE_PASSWORD", "")
-    if not email or not password:
-        logger.error("TRAXSOURCE_EMAIL / TRAXSOURCE_PASSWORD not set in .env")
-        return False
-
-    page.goto(TRAXSOURCE_LOGIN_URL, timeout=NAV_TIMEOUT_MS)
-    time.sleep(PAGE_LOAD_WAIT_SEC)
-    _dismiss_cookie_banner(page, TS_COOKIE_ACCEPT)
-
-    page.locator(TS_EMAIL_INPUT).first.fill(email)
-    page.locator(TS_PASSWORD_INPUT).first.fill(password)
-    page.locator(TS_LOGIN_BUTTON).first.click()
-    time.sleep(LOGIN_WAIT_SEC)
-
-    if page.locator(TS_LOGGED_IN_INDICATOR).first.is_visible(timeout=5_000):
-        logger.info("Traxsource login successful")
-        return True
-
-    logger.warning("Traxsource login may have failed — indicator not found")
-    return False
-
-
-def _traxsource_is_logged_in(page: Page) -> bool:
-    """Check if we already have a valid Traxsource session."""
-    page.goto(TRAXSOURCE_BASE_URL, timeout=NAV_TIMEOUT_MS)
-    time.sleep(PAGE_LOAD_WAIT_SEC)
-    _dismiss_cookie_banner(page, TS_COOKIE_ACCEPT)
-    try:
-        return page.locator(TS_LOGGED_IN_INDICATOR).first.is_visible(timeout=5_000)
-    except PlaywrightTimeout:
-        return False
-
-
-def _traxsource_add_track(page: Page, track: dict[str, Any]) -> bool:
-    """Navigate to a Traxsource track URL, select WAV, add to cart."""
-    url = track.get("traxsource_url")
-    if not url:
-        logger.warning("Track %s has no traxsource_url — skipping", track["id"])
-        return False
-
-    page.goto(url, timeout=NAV_TIMEOUT_MS)
-    time.sleep(PAGE_LOAD_WAIT_SEC)
-
-    try:
-        wav_btn = page.locator(TS_WAV_BUY_BUTTON).first
-        if wav_btn.is_visible(timeout=3_000):
-            wav_btn.click()
-            time.sleep(0.5)
-    except PlaywrightTimeout:
-        logger.debug("No WAV button found for %s — trying direct add", url)
-
-    try:
-        cart_btn = page.locator(TS_ADD_TO_CART).first
-        cart_btn.wait_for(state="visible", timeout=5_000)
-        cart_btn.click()
-        time.sleep(ACTION_DELAY_SEC)
-        return True
-    except PlaywrightTimeout:
-        logger.error("Add-to-cart button not found on %s", url)
-        return False
-
-
-# ---------------------------------------------------------------------------
 # Orchestrator — runs the full cart-building session
 # ---------------------------------------------------------------------------
 
@@ -326,7 +245,7 @@ def build_cart(store: Store) -> dict[str, Any]:
     _running[store] = True
     _broadcast("cart_started", {"store": store})
 
-    url_field = "beatport_url" if store == "beatport" else "traxsource_url"
+    url_field = "beatport_url"
     tracks = get_tracks_by_status("approved")
     eligible = [t for t in tracks if t.get(url_field)]
 
@@ -432,22 +351,15 @@ def _launch_browser(pw: Playwright, store: Store) -> tuple[BrowserContext, Page]
 
 
 def _ensure_logged_in(page: Page, store: Store) -> None:
-    """Check session validity; for Beatport, wait for you to log in in Chrome."""
-    if store == "beatport":
-        _open_beatport_homepage(page)
-        _wait_for_you_to_log_in_to_beatport(page)
-        return
-    if not _traxsource_is_logged_in(page):
-        if not _traxsource_login(page):
-            raise RuntimeError("Failed to log in to Traxsource")
+    """Check session validity; wait for you to log in in Chrome."""
+    _open_beatport_homepage(page)
+    _wait_for_you_to_log_in_to_beatport(page)
 
 
 def _add_track_to_cart(page: Page, track: dict[str, Any], store: Store) -> bool:
-    """Dispatch to the correct store's add-to-cart routine."""
+    """Add a track to the Beatport cart."""
     try:
-        if store == "beatport":
-            return _beatport_add_track(page, track)
-        return _traxsource_add_track(page, track)
+        return _beatport_add_track(page, track)
     except Exception as exc:
         logger.error(
             "Exception adding track %s to %s cart: %s",
@@ -458,7 +370,7 @@ def _add_track_to_cart(page: Page, track: dict[str, Any], store: Store) -> bool:
 
 def _navigate_to_cart(page: Page, store: Store) -> None:
     """Go to the cart / checkout page so the user can review."""
-    cart_url = BEATPORT_CART_URL if store == "beatport" else TRAXSOURCE_CART_URL
+    cart_url = BEATPORT_CART_URL
     try:
         page.goto(cart_url, timeout=NAV_TIMEOUT_MS)
         time.sleep(PAGE_LOAD_WAIT_SEC)
