@@ -1,4 +1,4 @@
-"""Slice 2 resolve journeys: skip song.link, persist scrape hits, keep the batch going.
+"""Resolve journeys: Beatport-only scrape, persist hits, keep the batch going.
 
 These tests never hit api.song.link, Beatport, Traxsource, or Playwright.
 They drive resolve_tracks with httpx and store search mocked.
@@ -19,7 +19,7 @@ import pytest
 
 import link_resolver as link_resolver_mod
 from beatport_browser import BeatportBrowserError
-from link_resolver import resolve_tracks
+from link_resolver import RESOLVABLE_STATUSES, resolve_tracks
 from test_link_resolver import (
     BEATPORT_ELECTRIC_LOVE_REMIX,
     ELECTRIC_LOVE_ARTISTS,
@@ -53,25 +53,46 @@ def _track(
 
 
 class _TracksQuery:
+    """Records PostgREST filters so tests can inspect the unscoped fetch."""
+
     def __init__(self, rows: list[dict[str, Any]]) -> None:
         self._rows = rows
+        self.filters: list[tuple[Any, ...]] = []
 
     def select(self, *_args: Any, **_kwargs: Any) -> _TracksQuery:
         return self
 
-    def in_(self, *_args: Any, **_kwargs: Any) -> _TracksQuery:
+    def in_(self, column: str, values: Any, **_kwargs: Any) -> _TracksQuery:
+        self.filters.append(("in_", column, list(values)))
+        return self
+
+    def or_(self, expression: str, **_kwargs: Any) -> _TracksQuery:
+        self.filters.append(("or_", expression))
+        return self
+
+    def is_(self, column: str, value: Any, **_kwargs: Any) -> _TracksQuery:
+        self.filters.append(("is_", column, value))
         return self
 
     def execute(self) -> SimpleNamespace:
         return SimpleNamespace(data=list(self._rows))
 
+    def filter_blob(self) -> str:
+        """Flatten recorded filters for substring checks."""
+        chunks: list[str] = []
+        for item in self.filters:
+            chunks.extend(str(part) for part in item)
+        return " ".join(chunks)
+
 
 class _FakeSupabase:
-    def __init__(self, rows: list[dict[str, Any]]) -> None:
-        self._rows = rows
+    def __init__(self, harness: _ResolveHarness) -> None:
+        self._harness = harness
 
     def table(self, _name: str) -> _TracksQuery:
-        return _TracksQuery(self._rows)
+        query = _TracksQuery(self._harness.tracks)
+        self._harness.last_query = query
+        return query
 
 
 class _RecordingHttpxClient:
@@ -104,6 +125,7 @@ class _ResolveHarness:
         self.ts_html = "<html></html>"
         self.httpx_client = _RecordingHttpxClient()
         self.bp_search_error: Exception | None = None
+        self.last_query: _TracksQuery | None = None
 
     def update_for(self, track_id: int) -> dict[str, Any]:
         matches = [fields for tid, fields in self.updates if tid == track_id]
@@ -114,7 +136,7 @@ class _ResolveHarness:
         """URLs that went to song.link, if any."""
         return [url for _, url in self.httpx_client.requests if "song.link" in url]
 
-    def run(self, track_ids: list[int]) -> dict[str, Any]:
+    def run(self, track_ids: list[int] | None) -> dict[str, Any]:
         return asyncio.run(resolve_tracks(track_ids))
 
 
@@ -137,7 +159,7 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _ResolveHarness:
         h.ts_searches.append((title, artist))
         return h.ts_html
 
-    monkeypatch.setattr("link_resolver.get_supabase", lambda: _FakeSupabase(h.tracks))
+    monkeypatch.setattr("link_resolver.get_supabase", lambda: _FakeSupabase(h))
     monkeypatch.setattr("link_resolver.update_track_fields", fake_update)
     monkeypatch.setattr("link_resolver.manager.broadcast", AsyncMock())
     # Patch the httpx module so a leftover Odesli client is still recorded,
@@ -154,7 +176,7 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _ResolveHarness:
 def test_resolve_links_does_not_request_song_link_and_still_scrapes_the_batch(
     harness: _ResolveHarness,
 ) -> None:
-    """Resolve Links scrapes both tracks and does not ask song.link."""
+    """Resolve Links scrapes Beatport only and does not ask song.link."""
     first = _track(
         11,
         name="Electric Love - Yulia Niko Remix",
@@ -183,7 +205,10 @@ def test_resolve_links_does_not_request_song_link_and_still_scrapes_the_batch(
     assert first["track_name"] in scraped_titles
     assert second["track_name"] in scraped_titles
     assert len(harness.bp_searches) == 2
-    assert len(harness.ts_searches) == 2
+    assert harness.ts_searches == [], (
+        "Resolve Links must not search Traxsource; "
+        f"got {harness.ts_searches}"
+    )
 
     assert summary["total"] == 2
     assert summary.get("batch_error") in (None, "")
@@ -275,4 +300,45 @@ def test_batch_still_continues_when_beatport_search_fails(
 
     persisted = harness.update_for(42)
     assert persisted["match_confidence"]
-    assert any(title == second["track_name"] for title, _artist in harness.ts_searches)
+
+
+def test_unscoped_resolve_does_not_select_tracks_that_only_lack_traxsource_url(
+    harness: _ResolveHarness,
+) -> None:
+    """Resolve-all queues tracks missing Beatport, not Traxsource-only gaps."""
+    harness.tracks = []
+
+    harness.run(None)
+
+    query = harness.last_query
+    assert query is not None
+
+    status_filters = [
+        item[2]
+        for item in query.filters
+        if item[0] == "in_" and item[1] == "status"
+    ]
+    assert status_filters, "unscoped fetch must keep the resolvable-status filter"
+    assert set(status_filters[0]) == set(RESOLVABLE_STATUSES)
+
+    blob = query.filter_blob()
+    assert "traxsource_url.is.null" not in blob, (
+        "unscoped fetch must not OR traxsource_url.is.null; "
+        f"got {query.filters}"
+    )
+    assert "traxsource_url" not in blob, (
+        "unscoped fetch must not filter on traxsource_url; "
+        f"got {query.filters}"
+    )
+
+    beatport_null = (
+        "beatport_url.is.null" in blob
+        or any(
+            item[0] == "is_" and item[1] == "beatport_url"
+            for item in query.filters
+        )
+    )
+    assert beatport_null, (
+        "unscoped fetch must still require beatport_url null; "
+        f"got {query.filters}"
+    )

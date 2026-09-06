@@ -1,8 +1,7 @@
-"""Link resolver: finds Beatport and Traxsource URLs for Spotify tracks.
+"""Link resolver: finds Beatport URLs for Spotify tracks.
 
 Resolution strategy (per track):
   1. Beatport search — scrape search results, fuzzy-match.
-  2. Traxsource search — same pattern, different selectors.
 
 Each result gets a confidence score:
   high   (>= 90)  — almost certainly the same track
@@ -456,7 +455,6 @@ async def _traxsource_search(
 async def resolve_track(
     track: dict,
     bp_browser: BeatportBrowser | None = None,
-    ts_browser: TraxsourceBrowser | None = None,
 ) -> dict:
     """Resolve store links for one track.
 
@@ -470,9 +468,9 @@ async def resolve_track(
             "errors":             list[str]   # per-source failures, user-facing
         }
 
-    ``bp_browser`` / ``ts_browser`` must be provided to enable Beatport /
-    Traxsource search respectively. Callers construct one browser of each
-    per batch and share them across tracks.
+    ``bp_browser`` must be provided to enable Beatport search. Callers
+    construct one browser per batch and share it across tracks.
+    ``traxsource_url`` stays ``None`` on this path.
     """
     title = track.get("track_name", "")
     artist = track.get("artist_name", "")
@@ -516,33 +514,6 @@ async def resolve_track(
                 )
                 result["errors"].append(f"beatport: {exc}")
 
-    # --- Traxsource scraping (via Playwright) ---
-    if title and artist:
-        if ts_browser is None:
-            result["errors"].append("traxsource: browser session unavailable")
-        else:
-            await asyncio.sleep(SCRAPE_DELAY_SECS)
-            try:
-                ts_url, ts_score = await _traxsource_search(ts_browser, title, artist)
-                if ts_url:
-                    result["traxsource_url"] = ts_url
-                    best_score = max(best_score, ts_score)
-            except TraxsourceBrowserError as exc:
-                # Per-search fresh contexts make failures independent, so a
-                # blocked search doesn't doom the rest of the batch — log it
-                # and move on rather than short-circuiting like Beatport.
-                logger.warning(
-                    "Traxsource browser error for '%s - %s': %s",
-                    artist, title, exc,
-                )
-                result["errors"].append(f"traxsource: {exc}")
-            except Exception as exc:
-                logger.warning(
-                    "Traxsource search failed for '%s - %s': %s",
-                    artist, title, exc,
-                )
-                result["errors"].append(f"traxsource: {exc}")
-
     if result["beatport_url"] or result["traxsource_url"]:
         result["confidence_score"] = best_score
         result["match_confidence"] = _classify_confidence(best_score)
@@ -555,7 +526,7 @@ async def resolve_track(
 # ---------------------------------------------------------------------------
 
 def _fetch_tracks_needing_resolution() -> list[dict]:
-    """Default batch target: active tracks missing at least one store URL.
+    """Default batch target: active tracks missing a Beatport URL.
 
     Previously limited to ``status = 'new'`` which silently skipped any track
     that had been approved or cart-failed before resolution ever ran. We now
@@ -566,7 +537,7 @@ def _fetch_tracks_needing_resolution() -> list[dict]:
         .table("tracks")
         .select("*")
         .in_("status", list(RESOLVABLE_STATUSES))
-        .or_("beatport_url.is.null,traxsource_url.is.null")
+        .is_("beatport_url", "null")
         .execute()
         .data
     )
@@ -600,7 +571,7 @@ async def _run_resolve_batch(track_ids: list[int] | None = None) -> dict:
     """Resolve links for a batch of tracks.
 
     *track_ids*: explicit list, or ``None`` to resolve every active track
-    still missing a Beatport or Traxsource URL.
+    still missing a Beatport URL.
 
     Broadcasts ``resolve_progress`` and ``resolve_complete`` via WebSocket.
     On browser-level failure, sends a final ``resolve_complete`` with
@@ -635,7 +606,6 @@ async def _run_resolve_batch(track_ids: list[int] | None = None) -> dict:
     })
 
     bp_browser = BeatportBrowser()
-    ts_browser = TraxsourceBrowser()
     try:
         for idx, track in enumerate(tracks, start=1):
             track_id = track["id"]
@@ -656,7 +626,6 @@ async def _run_resolve_batch(track_ids: list[int] | None = None) -> dict:
                 resolved = await resolve_track(
                     track,
                     bp_browser if not batch_error else None,
-                    ts_browser,
                 )
 
                 update_payload: dict = {
@@ -681,7 +650,7 @@ async def _run_resolve_batch(track_ids: list[int] | None = None) -> dict:
 
             except BeatportBrowserError as exc:
                 # Browser died mid-batch — stop using it for the rest of the
-                # tracks but keep going so Traxsource results still land.
+                # tracks but keep going so remaining tracks still persist.
                 batch_error = (
                     f"Beatport browser session failed: {exc}. "
                     f"Remaining tracks skipped Beatport fallback."
@@ -710,7 +679,6 @@ async def _run_resolve_batch(track_ids: list[int] | None = None) -> dict:
                 })
     finally:
         await bp_browser.close()
-        await ts_browser.close()
 
     summary = {
         "resolved": sum(
