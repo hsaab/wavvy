@@ -16,7 +16,7 @@ Local Mac application that automates DJ track acquisition — from Spotify playl
 
 ```bash
 cp .env.example .env
-# Edit .env with your Beatport/Traxsource credentials
+# Edit .env with your Beatport credentials
 
 cp config.example.json config.json
 # Edit config.json with your Spotify + Supabase credentials

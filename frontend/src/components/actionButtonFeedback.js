@@ -19,7 +19,7 @@ export function cartButtonLabel({ store, cartStarting, isCartRunning }) {
   if (cartStarting === store || isCartRunning) {
     return "Carting…";
   }
-  return store === "traxsource" ? "Cart TS" : "Cart BP";
+  return "Cart BP";
 }
 
 export function cartButtonDisabled({ cartStarting, isCartRunning }) {
@@ -27,5 +27,5 @@ export function cartButtonDisabled({ cartStarting, isCartRunning }) {
 }
 
 export function shouldIgnoreCartClick({ cartInFlight, isCartRunning }) {
-  return cartInFlight === "beatport" || cartInFlight === "traxsource" || Boolean(isCartRunning);
+  return cartInFlight === "beatport" || Boolean(isCartRunning);
 }

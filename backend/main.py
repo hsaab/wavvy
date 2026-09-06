@@ -332,9 +332,9 @@ async def resolve_links(body: dict | None = None):
 
 @app.post("/api/cart/build")
 async def build_cart_endpoint(body: dict):
-    """Launch a Playwright cart-building session for a store.
+    """Launch a Playwright cart-building session for Beatport.
 
-    Body: {"store": "beatport" | "traxsource"}
+    Body: {"store": "beatport"}
 
     Automatically resolves missing store links for approved tracks before
     starting the cart build.  Runs in a background thread so it doesn't
@@ -347,10 +347,10 @@ async def build_cart_endpoint(body: dict):
     from link_resolver import resolve_tracks
 
     store = body.get("store")
-    if store not in ("beatport", "traxsource"):
+    if store != "beatport":
         raise HTTPException(
             status_code=400,
-            detail="store must be 'beatport' or 'traxsource'",
+            detail="store must be 'beatport'",
         )
 
     if is_running(store):
@@ -359,7 +359,7 @@ async def build_cart_endpoint(body: dict):
             detail=f"Cart build already running for {store}",
         )
 
-    url_field = "beatport_url" if store == "beatport" else "traxsource_url"
+    url_field = "beatport_url"
     approved = await asyncio.to_thread(get_tracks_by_status, "approved")
 
     if not approved:
@@ -381,10 +381,9 @@ async def build_cart_endpoint(body: dict):
     refreshed = await asyncio.to_thread(get_tracks_by_status, "approved")
     eligible = [t for t in refreshed if t.get(url_field)]
     if not eligible:
-        store_label = "Beatport" if store == "beatport" else "Traxsource"
         raise HTTPException(
             status_code=400,
-            detail=f"No approved tracks have {store_label} links. Resolve links first, then try again.",
+            detail="No approved tracks have Beatport links. Resolve links first, then try again.",
         )
 
     cart_builder._loop = asyncio.get_running_loop()
@@ -399,7 +398,6 @@ async def cart_status():
     from cart_builder import is_running
     return {
         "beatport": is_running("beatport"),
-        "traxsource": is_running("traxsource"),
     }
 
 

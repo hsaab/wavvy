@@ -1,3 +1,7 @@
+// Slice 1 Track Queue buttons (Open TS Links, Cart TS, per-row TS) are checked
+// with the plan rg recipe from repo root:
+// rg -n 'openApprovedLinks\("traxsource"\)|handleBuildCart\("traxsource"\)|Open TS|Cart TS' frontend/
+
 import assert from "node:assert/strict";
 import {
   resolveLinksLabel,
@@ -49,9 +53,9 @@ expectCartLabel(
   "Cart BP",
 );
 expectCartLabel(
-  "Idle empty queue: Cart TS shows the default label",
+  "Leftover store traxsource: label is Cart BP, not Cart TS",
   { store: "traxsource", cartStarting: null, isCartRunning: false },
-  "Cart TS",
+  "Cart BP",
 );
 expectCartDisabled(
   "Idle empty queue: cart buttons are enabled",
@@ -116,37 +120,15 @@ expectResolveLabel(
   "Resolve Links (4)",
 );
 
-// Click Cart BP: Carting… immediately, before any WS event; both cart buttons disabled
+// Click Cart BP: Carting… immediately, before any WS event; cart button disabled
 expectCartLabel(
   "Click Cart BP before any WS event: Cart BP shows Carting…",
   { store: "beatport", cartStarting: "beatport", isCartRunning: false },
   "Carting…",
 );
-expectCartLabel(
-  "Click Cart BP before any WS event: Cart TS stays Cart TS, not Carting…",
-  { store: "traxsource", cartStarting: "beatport", isCartRunning: false },
-  "Cart TS",
-);
 expectCartDisabled(
-  "Click Cart BP before any WS event: both cart buttons are disabled",
+  "Click Cart BP before any WS event: cart button is disabled",
   { cartStarting: "beatport", isCartRunning: false },
-  true,
-);
-
-// Click Cart TS: Carting… on TS, both disabled, BP stays Cart BP
-expectCartLabel(
-  "Click Cart TS before any WS event: Cart TS shows Carting…",
-  { store: "traxsource", cartStarting: "traxsource", isCartRunning: false },
-  "Carting…",
-);
-expectCartLabel(
-  "Click Cart TS before any WS event: Cart BP stays Cart BP, not Carting…",
-  { store: "beatport", cartStarting: "traxsource", isCartRunning: false },
-  "Cart BP",
-);
-expectCartDisabled(
-  "Click Cart TS before any WS event: both cart buttons are disabled",
-  { cartStarting: "traxsource", isCartRunning: false },
   true,
 );
 
@@ -156,13 +138,8 @@ expectCartLabel(
   { store: "beatport", cartStarting: null, isCartRunning: true },
   "Carting…",
 );
-expectCartLabel(
-  "Cart WS cart_started: isCartRunning also shows Carting… on Cart TS",
-  { store: "traxsource", cartStarting: null, isCartRunning: true },
-  "Carting…",
-);
 expectCartDisabled(
-  "Cart WS cart_started: both cart buttons stay disabled via isCartRunning",
+  "Cart WS cart_started: cart button stays disabled via isCartRunning",
   { cartStarting: null, isCartRunning: true },
   true,
 );
@@ -181,18 +158,11 @@ expectIgnoreCartClick(
   true,
 );
 
-// Click Cart BP, then spam Cart TS in the same moment (shared in-flight lock)
+// Stale Traxsource in-flight is not a live store, so it must not lock Cart BP
 expectIgnoreCartClick(
-  "Click Cart BP then spam Cart TS in the same moment: ignored because cartInFlight is already beatport",
-  { cartInFlight: "beatport", isCartRunning: false },
-  true,
-);
-
-// Click Cart TS, then spam
-expectIgnoreCartClick(
-  "Click Cart TS then spam: ignored because cartInFlight is traxsource",
+  "Stale cartInFlight traxsource: not a live store, click is not ignored",
   { cartInFlight: "traxsource", isCartRunning: false },
-  true,
+  false,
 );
 
 // After cart_started: still ignored so a second POST cannot start while Playwright is running
